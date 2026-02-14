@@ -111,6 +111,65 @@ const parseDateTimeOrNull = (value) => {
     }
 };
 
+const PRODUCT_SIZE_OPTIONS = [
+    "0-1 year",
+    "1-2 year",
+    "2-4 year",
+    "S",
+    "M",
+    "L",
+    "XL",
+    "XXL",
+    "XXXL",
+];
+
+const parseProductSizesOrNull = (value) => {
+    if (value === undefined || value === null || value === "") return null;
+
+    let rawList = [];
+    if (Array.isArray(value)) {
+        rawList = value;
+    } else {
+        const s = String(value);
+        const trimmed = s.trim();
+        if (!trimmed) return null;
+
+        // FormData typically sends JSON string like: ["S","M"]
+        if ((trimmed.startsWith("[") && trimmed.endsWith("]")) || (trimmed.startsWith("\"") && trimmed.endsWith("\""))) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                if (Array.isArray(parsed)) rawList = parsed;
+                else if (typeof parsed === "string") rawList = parsed.split(",");
+            } catch {
+                rawList = trimmed.split(",");
+            }
+        } else {
+            rawList = trimmed.split(",");
+        }
+    }
+
+    const allowed = new Map(PRODUCT_SIZE_OPTIONS.map((x) => [String(x).toLowerCase(), x]));
+    const picked = [];
+    const seen = new Set();
+
+    for (const item of rawList) {
+        const normalized = String(item || "").trim();
+        if (!normalized) continue;
+        const canon = allowed.get(normalized.toLowerCase());
+        if (!canon) continue;
+        if (seen.has(canon)) continue;
+        seen.add(canon);
+        picked.push(canon);
+    }
+
+    if (!picked.length) return null;
+
+    // Keep a stable order.
+    const weight = new Map(PRODUCT_SIZE_OPTIONS.map((x, i) => [x, i]));
+    picked.sort((a, b) => (weight.get(a) ?? 999) - (weight.get(b) ?? 999));
+    return picked;
+};
+
 const isMissingColumnError = (err) => {
     const msg = String(err?.message || "").toLowerCase();
     // Postgres (SQL) style
@@ -134,10 +193,13 @@ const normalizeCategory = (value) => {
 
 const insertWithFallback = async (table, row, fallbackRow) => {
     let result = await supabaseAdmin.from(table).insert([row]).select("*").single();
-    if (result.error && isMissingColumnError(result.error) && fallbackRow) {
-        result = await supabaseAdmin.from(table).insert([fallbackRow]).select("*").single();
-    }
-    return result;
+        result.usedFallback = false;
+        if (result.error && isMissingColumnError(result.error) && fallbackRow) {
+            const fallback = await supabaseAdmin.from(table).insert([fallbackRow]).select("*").single();
+            fallback.usedFallback = true;
+            return fallback;
+        }
+        return result;
 };
 
 const updateWithFallback = async (table, update, whereEq, fallbackUpdate) => {
@@ -147,12 +209,15 @@ const updateWithFallback = async (table, update, whereEq, fallbackUpdate) => {
     });
     let result = await q.select("*").maybeSingle();
 
+    result.usedFallback = false;
     if (result.error && isMissingColumnError(result.error) && fallbackUpdate) {
         let q2 = supabaseAdmin.from(table).update(fallbackUpdate);
         Object.entries(whereEq || {}).forEach(([k, v]) => {
             q2 = q2.eq(k, v);
         });
         result = await q2.select("*").maybeSingle();
+
+        result.usedFallback = true;
     }
 
     return result;
@@ -417,6 +482,7 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
     const priceUsdRaw = req.body?.price_usd ?? req.body?.priceUsd;
     const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr ?? req.body?.mrp;
     const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
+    const sizesRaw = req.body?.sizes;
 
     try {
         const keys = Object.keys(req.body || {});
@@ -546,6 +612,7 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
         mrp_inr: parsedMrpInr,
         mrp_usd: parsedMrpUsd,
         description: description || null,
+        sizes: parseProductSizesOrNull(sizesRaw),
         ...imageUrls,
     };
 
@@ -556,8 +623,18 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
         ...imageUrls,
     };
 
-    const { data, error } = await insertWithFallback("products", row, fallbackRow);
+    const result = await insertWithFallback("products", row, fallbackRow);
+    const { data, error } = result;
     if (error) return res.status(400).json(error);
+
+    const requestedSizes = sizesRaw !== undefined && sizesRaw !== null && String(sizesRaw).trim() !== "";
+    if (requestedSizes && result.usedFallback) {
+        return res.status(201).json({
+            ...data,
+            warning: "Product saved, but sizes were NOT saved (DB missing products.sizes column). Run supabase-products-sizes.sql in Supabase SQL editor.",
+        });
+    }
+
     return res.status(201).json(data);
 });
 
@@ -611,6 +688,7 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr;
     const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
     const legacyPriceRaw = req.body?.price;
+    const sizesRaw = req.body?.sizes;
 
     if (categoryRaw !== undefined) {
         update.category = normalizeCategory(categoryRaw);
@@ -653,6 +731,10 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     if (description !== undefined) {
         const trimmed = String(description).trim();
         update.description = trimmed ? trimmed : null;
+    }
+
+    if (sizesRaw !== undefined) {
+        update.sizes = parseProductSizesOrNull(sizesRaw);
     }
 
     // If request is multipart and includes images, upload and replace image slots.
@@ -742,15 +824,26 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     delete fallbackUpdate.price_usd;
     delete fallbackUpdate.mrp_inr;
     delete fallbackUpdate.mrp_usd;
+    delete fallbackUpdate.sizes;
 
-    const { data: updated, error: updateError } = await updateWithFallback(
+    const result = await updateWithFallback(
         "products",
         update,
         { id },
         fallbackUpdate
     );
+    const { data: updated, error: updateError } = result;
 
     if (updateError) return res.status(400).json(updateError);
+
+    const requestedSizes = sizesRaw !== undefined && sizesRaw !== null && String(sizesRaw).trim() !== "";
+    if (requestedSizes && result.usedFallback) {
+        return res.json({
+            ...updated,
+            warning: "Product updated, but sizes were NOT saved (DB missing products.sizes column). Run supabase-products-sizes.sql in Supabase SQL editor.",
+        });
+    }
+
     return res.json(updated);
 });
 
@@ -951,7 +1044,7 @@ app.post("/orders", async (req, res) => {
 
     const { data, error } = await insertWithFallback("orders", orderRow, fallbackOrderRow);
     if (error) return res.status(400).json(error);
-    return res.status(201).json(data);
+    return res.status(201).json({ ok: true, orderId: data?.id, order: data });
 });
 
 // 👉 CUSTOMER: order history (requires customer login)
