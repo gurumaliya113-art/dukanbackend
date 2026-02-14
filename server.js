@@ -1074,6 +1074,65 @@ app.post("/admin/orders/:id/tracking/received", requireAdmin, async (req, res) =
     }
 });
 
+// 👉 ADMIN: update order status (so admin panel can manage orders without opening Supabase)
+app.patch("/admin/orders/:id/status", requireAdmin, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    const orderId = req.params.id;
+    if (!/^\d+$/.test(String(orderId))) {
+        return res.status(400).json({ error: "Invalid order id" });
+    }
+
+    const raw = req.body?.status === undefined ? "" : String(req.body.status);
+    const status = raw.trim().toLowerCase();
+    const allowed = new Set(["pending", "confirmed", "shipped", "delivered", "cancelled"]);
+    if (!allowed.has(status)) {
+        return res.status(400).json({
+            error: "Invalid status",
+            allowed: Array.from(allowed),
+        });
+    }
+
+    try {
+        const patch = { status };
+        // Convenience: if marked delivered, set delivered_at if available.
+        if (status === "delivered") {
+            patch.delivered_at = new Date().toISOString();
+        }
+
+        const { data: updated, error } = await supabaseAdmin
+            .from("orders")
+            .update(patch)
+            .eq("id", orderId)
+            .select("*")
+            .maybeSingle();
+
+        if (error) {
+            if (isMissingColumnError(error)) {
+                // delivered_at might not exist yet; retry without it.
+                const { data: updated2, error: error2 } = await supabaseAdmin
+                    .from("orders")
+                    .update({ status })
+                    .eq("id", orderId)
+                    .select("*")
+                    .maybeSingle();
+                if (error2) return res.status(400).json({ error: error2.message || "Failed to update status" });
+                return res.json({ ok: true, order: updated2 || null });
+            }
+            return res.status(400).json({ error: error.message || "Failed to update status" });
+        }
+
+        return res.json({ ok: true, order: updated || null });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to update status" });
+    }
+});
+
 // 👉 CUSTOMER: request return within 7 days (requires customer login)
 app.post("/customer/orders/:id/return", requireCustomer, async (req, res) => {
     if (!supabaseAdmin) {
