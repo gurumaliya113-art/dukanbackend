@@ -1345,6 +1345,63 @@ app.post("/customer/orders/:id/return", requireCustomer, async (req, res) => {
     }
 });
 
+// 👉 CUSTOMER: get 10% off pay-now offer for a COD order (requires customer login)
+app.get("/customer/orders/:id/pay-offer", requireCustomer, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    const orderId = req.params.id;
+
+    try {
+        const user = req.customer;
+        const userId = user.id;
+        const email = user.email ? String(user.email).trim().toLowerCase() : "";
+        const emailConfirmed = !!user.email_confirmed_at;
+
+        const { data: order, error: loadError } = await supabaseAdmin
+            .from("orders")
+            .select("*")
+            .eq("id", orderId)
+            .maybeSingle();
+
+        if (loadError) return res.status(400).json({ error: loadError.message || "Failed to load order" });
+        if (!order) return res.status(404).json({ error: "Order not found" });
+
+        const ownsById = order.customer_user_id && String(order.customer_user_id) === String(userId);
+        const ownsByEmail = !order.customer_user_id && emailConfirmed && email && String(order.email || "").toLowerCase() === email;
+        if (!ownsById && !ownsByEmail) return res.status(403).json({ error: "Not allowed" });
+
+        const currency = order.currency ? String(order.currency).toUpperCase() : "INR";
+        const originalAmount = parseNumberOrNull(order.amount);
+        if (originalAmount === null || originalAmount <= 0) {
+            return res.status(400).json({ error: "Order amount missing" });
+        }
+
+        const discountPercent = 10;
+        const rawDiscounted = originalAmount * (1 - discountPercent / 100);
+        const discountedAmount = currency === "USD"
+            ? Math.round(rawDiscounted * 100) / 100
+            : Math.round(rawDiscounted);
+
+        return res.json({
+            ok: true,
+            offer: {
+                orderId: order.id,
+                discountPercent,
+                currency,
+                originalAmount,
+                discountedAmount,
+            },
+        });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to load pay offer" });
+    }
+});
+
 // -------------------- PAYPAL (USA PAYMENTS) --------------------
 
 const getPayPalBaseUrl = () => {
