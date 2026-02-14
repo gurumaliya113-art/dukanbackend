@@ -802,6 +802,18 @@ app.post("/orders", async (req, res) => {
         return res.status(400).json({ error: "Product price missing for selected currency" });
     }
 
+    // Optional: if the customer is logged in on frontend, it can send a bearer token.
+    // We use it to associate the order with that customer.
+    let customerUserId = null;
+    const customerToken = getBearerToken(req);
+    if (customerToken) {
+        const { data: userData, error: userError } = await supabasePublic.auth.getUser(customerToken);
+        if (userError || !userData?.user) {
+            return res.status(401).json({ error: "Invalid or expired customer token" });
+        }
+        customerUserId = userData.user.id;
+    }
+
     const orderRow = {
         product_id: product.id,
         product_name: product.name,
@@ -820,8 +832,13 @@ app.post("/orders", async (req, res) => {
         currency: normalizedCurrency,
     };
 
+    if (customerUserId) {
+        orderRow.customer_user_id = customerUserId;
+    }
+
     const fallbackOrderRow = { ...orderRow };
     delete fallbackOrderRow.currency;
+    delete fallbackOrderRow.customer_user_id;
 
     const { data, error } = await insertWithFallback("orders", orderRow, fallbackOrderRow);
     if (error) return res.status(400).json(error);
@@ -1011,6 +1028,17 @@ app.post("/paypal/capture-order", async (req, res) => {
     const computed = await computeUsdTotalFromItems(items);
     if (!computed.ok) return res.status(400).json({ error: computed.error });
 
+    // Optional: customer association (same as COD endpoint)
+    let customerUserId = null;
+    const customerToken = getBearerToken(req);
+    if (customerToken) {
+        const { data: userData, error: userError } = await supabasePublic.auth.getUser(customerToken);
+        if (userError || !userData?.user) {
+            return res.status(401).json({ error: "Invalid or expired customer token" });
+        }
+        customerUserId = userData.user.id;
+    }
+
     try {
         const accessToken = await getPayPalAccessToken();
         const baseUrl = getPayPalBaseUrl();
@@ -1083,8 +1111,13 @@ app.post("/paypal/capture-order", async (req, res) => {
                     currency: "USD",
                 };
 
+                if (customerUserId) {
+                    orderRow.customer_user_id = customerUserId;
+                }
+
                 const fallbackOrderRow = { ...orderRow };
                 delete fallbackOrderRow.currency;
+                delete fallbackOrderRow.customer_user_id;
 
                 // eslint-disable-next-line no-await-in-loop
                 const { data, error } = await insertWithFallback("orders", orderRow, fallbackOrderRow);
