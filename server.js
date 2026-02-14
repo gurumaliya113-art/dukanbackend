@@ -100,6 +100,17 @@ const parseNumberOrNull = (value) => {
     return n;
 };
 
+const parseDateTimeOrNull = (value) => {
+    if (value === undefined || value === null || value === "") return null;
+    try {
+        const d = new Date(value);
+        if (Number.isNaN(d.getTime())) return null;
+        return d.toISOString();
+    } catch {
+        return null;
+    }
+};
+
 const isMissingColumnError = (err) => {
     const msg = String(err?.message || "").toLowerCase();
     // Postgres (SQL) style
@@ -145,6 +156,41 @@ const updateWithFallback = async (table, update, whereEq, fallbackUpdate) => {
     }
 
     return result;
+};
+
+const attachTrackingUpdates = async (orders) => {
+    if (!supabaseAdmin) return orders;
+    if (!Array.isArray(orders) || orders.length === 0) return orders;
+
+    const ids = orders.map((o) => o?.id).filter(Boolean);
+    if (ids.length === 0) return orders;
+
+    try {
+        const { data: updates, error } = await supabaseAdmin
+            .from("order_tracking_updates")
+            .select("id,order_id,location,note,created_at")
+            .in("order_id", ids)
+            .order("created_at", { ascending: false });
+
+        if (error) {
+            // If table/columns not present yet, do not fail main response.
+            return orders;
+        }
+
+        const grouped = new Map();
+        (updates || []).forEach((u) => {
+            const key = u.order_id;
+            if (!grouped.has(key)) grouped.set(key, []);
+            grouped.get(key).push(u);
+        });
+
+        return orders.map((o) => ({
+            ...o,
+            tracking_received: grouped.get(o.id) || [],
+        }));
+    } catch {
+        return orders;
+    }
 };
 
 const maybeUploadImages = (req, res, next) => {
@@ -893,9 +939,138 @@ app.get("/customer/orders", requireCustomer, async (req, res) => {
 
         const { data, error } = await q;
         if (error) return res.status(400).json({ error: error.message || "Failed to load orders" });
-        return res.json({ ok: true, orders: data || [] });
+
+        const withTracking = await attachTrackingUpdates(data || []);
+        return res.json({ ok: true, orders: withTracking || [] });
     } catch (e) {
         return res.status(500).json({ error: e?.message || "Failed to load orders" });
+    }
+});
+
+// 👉 ADMIN: list orders (for tracking updates panel)
+app.get("/admin/orders", requireAdmin, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    const limit = Math.min(Math.max(Number(req.query.limit || 100), 1), 500);
+    try {
+        const { data, error } = await supabaseAdmin
+            .from("orders")
+            .select("*")
+            .order("created_at", { ascending: false })
+            .limit(limit);
+
+        if (error) return res.status(400).json({ error: error.message || "Failed to load orders" });
+        const withTracking = await attachTrackingUpdates(data || []);
+        return res.json({ ok: true, orders: withTracking || [] });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to load orders" });
+    }
+});
+
+// 👉 ADMIN: update tracking fields on an order
+app.patch("/admin/orders/:id/tracking", requireAdmin, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    const orderId = req.params.id;
+    if (!/^\d+$/.test(String(orderId))) {
+        return res.status(400).json({ error: "Invalid order id" });
+    }
+    const body = req.body || {};
+
+    const patch = {
+        estimated_delivery_at: parseDateTimeOrNull(body.estimatedDeliveryAt),
+        picked_up_from: body.pickedUpFrom !== undefined ? (String(body.pickedUpFrom || "").trim() || null) : undefined,
+        picked_up_at: parseDateTimeOrNull(body.pickedUpAt),
+        out_for_delivery: body.outForDelivery === undefined ? undefined : !!body.outForDelivery,
+        out_for_delivery_at: parseDateTimeOrNull(body.outForDeliveryAt),
+        delivered_at: parseDateTimeOrNull(body.deliveredAt),
+    };
+
+    // Remove undefined keys so we don't overwrite fields accidentally.
+    Object.keys(patch).forEach((k) => {
+        if (patch[k] === undefined) delete patch[k];
+    });
+
+    try {
+        const { data: updated, error } = await supabaseAdmin
+            .from("orders")
+            .update(patch)
+            .eq("id", orderId)
+            .select("*")
+            .maybeSingle();
+
+        if (error) {
+            if (isMissingColumnError(error)) {
+                return res.status(400).json({
+                    error: error.message,
+                    hint: "Run backend/supabase-orders-returns.sql in Supabase SQL Editor to add tracking columns.",
+                });
+            }
+            return res.status(400).json({ error: error.message || "Failed to update tracking" });
+        }
+
+        return res.json({ ok: true, order: updated || null });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to update tracking" });
+    }
+});
+
+// 👉 ADMIN: add a "received at" location update (multiple times)
+app.post("/admin/orders/:id/tracking/received", requireAdmin, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    const orderId = req.params.id;
+    if (!/^\d+$/.test(String(orderId))) {
+        return res.status(400).json({ error: "Invalid order id" });
+    }
+    const location = req.body?.location ? String(req.body.location).trim() : "";
+    const note = req.body?.note ? String(req.body.note).trim() : "";
+    const createdAt = parseDateTimeOrNull(req.body?.receivedAt);
+
+    if (!location) return res.status(400).json({ error: "location is required" });
+
+    const row = {
+        order_id: orderId,
+        location,
+        note: note || null,
+    };
+    if (createdAt) row.created_at = createdAt;
+
+    try {
+        const { data, error } = await supabaseAdmin
+            .from("order_tracking_updates")
+            .insert([row])
+            .select("id,order_id,location,note,created_at")
+            .single();
+
+        if (error) {
+            if (isMissingColumnError(error)) {
+                return res.status(400).json({
+                    error: error.message,
+                    hint: "Run backend/supabase-orders-returns.sql in Supabase SQL Editor to create order_tracking_updates table.",
+                });
+            }
+            return res.status(400).json({ error: error.message || "Failed to add tracking update" });
+        }
+
+        return res.status(201).json({ ok: true, update: data || null });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to add tracking update" });
     }
 });
 
