@@ -306,18 +306,44 @@ app.post("/admin/create", async (req, res) => {
         return res.status(400).json({ error: "Password must be at least 6 characters" });
     }
 
+    const normalizedEmail = String(email).trim().toLowerCase();
+
     const { data: created, error: createError } = await supabaseAdmin.auth.admin.createUser({
-        email: String(email).trim().toLowerCase(),
+        email: normalizedEmail,
         password: String(password),
         email_confirm: true,
     });
 
-    if (createError || !created?.user) {
-        return res.status(400).json({ error: createError?.message || "Failed to create admin user" });
-    }
+    // If user already exists, do not fail. Just grant admin to that existing user.
+    let userId = created?.user?.id || null;
+    let userEmail = created?.user?.email || normalizedEmail;
+    let existed = false;
 
-    const userId = created.user.id;
-    const userEmail = created.user.email || String(email).trim().toLowerCase();
+    if (createError || !created?.user) {
+        const msg = String(createError?.message || "");
+        const looksLikeExists = /already\s+been\s+registered|already\s+registered|user\s+already\s+registered|email\s+already\s+exists|duplicate/i.test(
+            msg.toLowerCase()
+        );
+
+        if (!looksLikeExists) {
+            return res.status(400).json({ error: createError?.message || "Failed to create admin user" });
+        }
+
+        const { data: existing, error: existingError } = await supabaseAdmin.auth.admin.getUserByEmail(
+            normalizedEmail
+        );
+
+        if (existingError || !existing?.user) {
+            return res.status(400).json({
+                error: existingError?.message || msg || "User exists but lookup failed",
+                hint: "Try logging in on Admin Panel (Login tab) or check Supabase Auth users.",
+            });
+        }
+
+        existed = true;
+        userId = existing.user.id;
+        userEmail = existing.user.email || normalizedEmail;
+    }
 
     const { error: insertError } = await supabaseAdmin
         .from("admin_users")
@@ -327,7 +353,7 @@ app.post("/admin/create", async (req, res) => {
         return res.status(400).json({ error: insertError.message || "Failed to mark user as admin" });
     }
 
-    return res.status(201).json({ ok: true, userId, email: userEmail });
+    return res.status(existed ? 200 : 201).json({ ok: true, userId, email: userEmail, existed });
 });
 
 // 👉 PRODUCTS ROUTE (YE ZAROORI HAI)
