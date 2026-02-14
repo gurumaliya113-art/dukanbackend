@@ -415,6 +415,8 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
     const category = normalizeCategory(req.body?.category);
     const priceInrRaw = req.body?.price_inr ?? req.body?.priceInr ?? req.body?.price;
     const priceUsdRaw = req.body?.price_usd ?? req.body?.priceUsd;
+    const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr ?? req.body?.mrp;
+    const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
 
     try {
         const keys = Object.keys(req.body || {});
@@ -434,6 +436,8 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
 
     const parsedPriceInr = parseNumberOrNull(priceInrRaw);
     const parsedPriceUsd = parseNumberOrNull(priceUsdRaw);
+    const parsedMrpInr = parseNumberOrNull(mrpInrRaw);
+    const parsedMrpUsd = parseNumberOrNull(mrpUsdRaw);
 
     if (!name || parsedPriceInr === null) {
         return res.status(400).json({
@@ -539,6 +543,8 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
         price: parsedPriceInr,
         price_inr: parsedPriceInr,
         price_usd: parsedPriceUsd,
+        mrp_inr: parsedMrpInr,
+        mrp_usd: parsedMrpUsd,
         description: description || null,
         ...imageUrls,
     };
@@ -602,6 +608,8 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     const categoryRaw = req.body?.category;
     const priceInrRaw = req.body?.price_inr ?? req.body?.priceInr;
     const priceUsdRaw = req.body?.price_usd ?? req.body?.priceUsd;
+    const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr;
+    const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
     const legacyPriceRaw = req.body?.price;
 
     if (categoryRaw !== undefined) {
@@ -615,6 +623,8 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
 
     const parsedPriceInr = priceInrRaw !== undefined ? parseNumberOrNull(priceInrRaw) : null;
     const parsedPriceUsd = priceUsdRaw !== undefined ? parseNumberOrNull(priceUsdRaw) : null;
+    const parsedMrpInr = mrpInrRaw !== undefined ? parseNumberOrNull(mrpInrRaw) : null;
+    const parsedMrpUsd = mrpUsdRaw !== undefined ? parseNumberOrNull(mrpUsdRaw) : null;
     const parsedLegacyPrice = legacyPriceRaw !== undefined ? parseNumberOrNull(legacyPriceRaw) : null;
 
     if (priceInrRaw !== undefined) {
@@ -630,6 +640,14 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     if (priceUsdRaw !== undefined) {
         if (parsedPriceUsd === null) return res.status(400).json({ error: "price_usd must be a number" });
         update.price_usd = parsedPriceUsd;
+    }
+
+    if (mrpInrRaw !== undefined) {
+        update.mrp_inr = parsedMrpInr;
+    }
+
+    if (mrpUsdRaw !== undefined) {
+        update.mrp_usd = parsedMrpUsd;
     }
 
     if (description !== undefined) {
@@ -722,6 +740,8 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     const fallbackUpdate = { ...update };
     delete fallbackUpdate.price_inr;
     delete fallbackUpdate.price_usd;
+    delete fallbackUpdate.mrp_inr;
+    delete fallbackUpdate.mrp_usd;
 
     const { data: updated, error: updateError } = await updateWithFallback(
         "products",
