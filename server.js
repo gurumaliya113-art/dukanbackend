@@ -71,6 +71,23 @@ const requireAdmin = async (req, res, next) => {
     }
 };
 
+const requireCustomer = async (req, res, next) => {
+    try {
+        const token = getBearerToken(req);
+        if (!token) return res.status(401).json({ error: "Missing Authorization bearer token" });
+
+        const { data: userData, error: userError } = await supabasePublic.auth.getUser(token);
+        if (userError || !userData?.user) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        req.customer = userData.user;
+        return next();
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Customer auth failed" });
+    }
+};
+
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 5 * 1024 * 1024 },
@@ -843,6 +860,116 @@ app.post("/orders", async (req, res) => {
     const { data, error } = await insertWithFallback("orders", orderRow, fallbackOrderRow);
     if (error) return res.status(400).json(error);
     return res.status(201).json(data);
+});
+
+// 👉 CUSTOMER: order history (requires customer login)
+app.get("/customer/orders", requireCustomer, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint:
+                "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    try {
+        const user = req.customer;
+        const userId = user.id;
+        const email = user.email ? String(user.email).trim().toLowerCase() : "";
+        const emailConfirmed = !!user.email_confirmed_at;
+
+        let q = supabaseAdmin
+            .from("orders")
+            .select("*")
+            .order("created_at", { ascending: false });
+
+        // Always include orders linked to user_id.
+        // Optionally include older guest orders by email, but only if email is confirmed.
+        if (email && emailConfirmed) {
+            q = q.or(`customer_user_id.eq.${userId},and(customer_user_id.is.null,email.eq.${email})`);
+        } else {
+            q = q.eq("customer_user_id", userId);
+        }
+
+        const { data, error } = await q;
+        if (error) return res.status(400).json({ error: error.message || "Failed to load orders" });
+        return res.json({ ok: true, orders: data || [] });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to load orders" });
+    }
+});
+
+// 👉 CUSTOMER: request return within 7 days (requires customer login)
+app.post("/customer/orders/:id/return", requireCustomer, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint:
+                "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    const orderId = req.params.id;
+    const reason = (req.body && req.body.reason) ? String(req.body.reason).trim() : null;
+
+    try {
+        const user = req.customer;
+        const userId = user.id;
+        const email = user.email ? String(user.email).trim().toLowerCase() : "";
+        const emailConfirmed = !!user.email_confirmed_at;
+
+        // Load order
+        const { data: order, error: loadError } = await supabaseAdmin
+            .from("orders")
+            .select("*")
+            .eq("id", orderId)
+            .maybeSingle();
+
+        if (loadError) return res.status(400).json({ error: loadError.message || "Failed to load order" });
+        if (!order) return res.status(404).json({ error: "Order not found" });
+
+        const ownsById = order.customer_user_id && String(order.customer_user_id) === String(userId);
+        const ownsByEmail = !order.customer_user_id && emailConfirmed && email && String(order.email || "").toLowerCase() === email;
+        if (!ownsById && !ownsByEmail) return res.status(403).json({ error: "Not allowed" });
+
+        const createdAt = order.created_at ? new Date(order.created_at) : null;
+        if (!createdAt || Number.isNaN(createdAt.getTime())) {
+            return res.status(400).json({ error: "Order date missing" });
+        }
+
+        const now = new Date();
+        const daysMs = 7 * 24 * 60 * 60 * 1000;
+        if (now.getTime() - createdAt.getTime() > daysMs) {
+            return res.status(400).json({ error: "Return window expired (7 days)" });
+        }
+
+        const patch = {
+            return_status: "requested",
+            return_requested_at: new Date().toISOString(),
+            return_reason: reason,
+        };
+
+        const { data: updated, error: updateError } = await supabaseAdmin
+            .from("orders")
+            .update(patch)
+            .eq("id", orderId)
+            .select("*")
+            .maybeSingle();
+
+        if (updateError) {
+            if (isMissingColumnError(updateError)) {
+                return res.status(400).json({
+                    error: updateError.message,
+                    hint: "Run backend/supabase-orders-returns.sql in Supabase SQL Editor to add return columns.",
+                });
+            }
+            return res.status(400).json({ error: updateError.message || "Failed to request return" });
+        }
+
+        return res.json({ ok: true, order: updated || null });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to request return" });
+    }
 });
 
 // -------------------- PAYPAL (USA PAYMENTS) --------------------
