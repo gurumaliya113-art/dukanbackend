@@ -100,6 +100,13 @@ const parseNumberOrNull = (value) => {
     return n;
 };
 
+const parseIntOrNull = (value) => {
+    const n = parseNumberOrNull(value);
+    if (n === null) return null;
+    if (!Number.isFinite(n)) return null;
+    return Math.trunc(n);
+};
+
 const parseDateTimeOrNull = (value) => {
     if (value === undefined || value === null || value === "") return null;
     try {
@@ -483,6 +490,9 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
     const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr ?? req.body?.mrp;
     const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
     const sizesRaw = req.body?.sizes;
+    const skuRaw = req.body?.sku;
+    const barcodeRaw = req.body?.barcode;
+    const quantityRaw = req.body?.quantity ?? req.body?.stock_quantity ?? req.body?.stock;
 
     try {
         const keys = Object.keys(req.body || {});
@@ -504,12 +514,22 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
     const parsedPriceUsd = parseNumberOrNull(priceUsdRaw);
     const parsedMrpInr = parseNumberOrNull(mrpInrRaw);
     const parsedMrpUsd = parseNumberOrNull(mrpUsdRaw);
+    const parsedQuantity = quantityRaw !== undefined ? parseIntOrNull(quantityRaw) : null;
 
     if (!name || parsedPriceInr === null) {
         return res.status(400).json({
             error: "Missing required fields: name, price_inr (or legacy price)",
             received: Object.keys(req.body || {}),
         });
+    }
+
+    if (quantityRaw !== undefined) {
+        if (parsedQuantity === null) {
+            return res.status(400).json({ error: "quantity must be an integer" });
+        }
+        if (parsedQuantity < 0) {
+            return res.status(400).json({ error: "quantity cannot be negative" });
+        }
     }
 
     let imageUrls = {
@@ -613,6 +633,9 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
         mrp_usd: parsedMrpUsd,
         description: description || null,
         sizes: parseProductSizesOrNull(sizesRaw),
+        sku: skuRaw !== undefined && String(skuRaw).trim() ? String(skuRaw).trim() : null,
+        barcode: barcodeRaw !== undefined && String(barcodeRaw).trim() ? String(barcodeRaw).trim() : null,
+        quantity: quantityRaw !== undefined ? parsedQuantity : null,
         ...imageUrls,
     };
 
@@ -632,6 +655,18 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
         return res.status(201).json({
             ...data,
             warning: "Product saved, but sizes were NOT saved (DB missing products.sizes column). Run supabase-products-sizes.sql in Supabase SQL editor.",
+        });
+    }
+
+    const requestedInventory =
+        (skuRaw !== undefined && String(skuRaw).trim() !== "") ||
+        (barcodeRaw !== undefined && String(barcodeRaw).trim() !== "") ||
+        quantityRaw !== undefined;
+    if (requestedInventory && result.usedFallback) {
+        return res.status(201).json({
+            ...data,
+            warning:
+                "Product saved, but inventory fields (sku/barcode/quantity) were NOT saved (DB missing columns). Run supabase-products-inventory.sql in Supabase SQL editor.",
         });
     }
 
@@ -689,6 +724,9 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
     const legacyPriceRaw = req.body?.price;
     const sizesRaw = req.body?.sizes;
+    const skuRaw = req.body?.sku;
+    const barcodeRaw = req.body?.barcode;
+    const quantityRaw = req.body?.quantity ?? req.body?.stock_quantity ?? req.body?.stock;
 
     if (categoryRaw !== undefined) {
         update.category = normalizeCategory(categoryRaw);
@@ -735,6 +773,23 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
 
     if (sizesRaw !== undefined) {
         update.sizes = parseProductSizesOrNull(sizesRaw);
+    }
+
+    if (skuRaw !== undefined) {
+        const trimmed = String(skuRaw || "").trim();
+        update.sku = trimmed ? trimmed : null;
+    }
+
+    if (barcodeRaw !== undefined) {
+        const trimmed = String(barcodeRaw || "").trim();
+        update.barcode = trimmed ? trimmed : null;
+    }
+
+    if (quantityRaw !== undefined) {
+        const parsed = parseIntOrNull(quantityRaw);
+        if (parsed === null) return res.status(400).json({ error: "quantity must be an integer" });
+        if (parsed < 0) return res.status(400).json({ error: "quantity cannot be negative" });
+        update.quantity = parsed;
     }
 
     // If request is multipart and includes images, upload and replace image slots.
@@ -825,6 +880,9 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     delete fallbackUpdate.mrp_inr;
     delete fallbackUpdate.mrp_usd;
     delete fallbackUpdate.sizes;
+    delete fallbackUpdate.sku;
+    delete fallbackUpdate.barcode;
+    delete fallbackUpdate.quantity;
 
     const result = await updateWithFallback(
         "products",
@@ -841,6 +899,15 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
         return res.json({
             ...updated,
             warning: "Product updated, but sizes were NOT saved (DB missing products.sizes column). Run supabase-products-sizes.sql in Supabase SQL editor.",
+        });
+    }
+
+    const requestedInventory = skuRaw !== undefined || barcodeRaw !== undefined || quantityRaw !== undefined;
+    if (requestedInventory && result.usedFallback) {
+        return res.json({
+            ...updated,
+            warning:
+                "Product updated, but inventory fields (sku/barcode/quantity) were NOT saved (DB missing columns). Run supabase-products-inventory.sql in Supabase SQL editor.",
         });
     }
 
