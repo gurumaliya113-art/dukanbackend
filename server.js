@@ -90,7 +90,7 @@ const requireCustomer = async (req, res, next) => {
 
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 5 * 1024 * 1024 },
+    limits: { fileSize: 50 * 1024 * 1024 },
 });
 
 const parseNumberOrNull = (value) => {
@@ -268,7 +268,10 @@ const attachTrackingUpdates = async (orders) => {
 const maybeUploadImages = (req, res, next) => {
     const contentType = req.headers["content-type"] || "";
     if (contentType.startsWith("multipart/form-data")) {
-        return upload.array("images", 4)(req, res, next);
+        return upload.fields([
+            { name: "images", maxCount: 4 },
+            { name: "video", maxCount: 1 },
+        ])(req, res, next);
     }
     return next();
 };
@@ -744,6 +747,7 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     const skuRaw = req.body?.sku;
     const barcodeRaw = req.body?.barcode;
     const quantityRaw = req.body?.quantity ?? req.body?.stock_quantity ?? req.body?.stock;
+    const videoUrlRaw = req.body?.video_url ?? req.body?.videoUrl;
 
     if (categoryRaw !== undefined) {
         update.category = normalizeCategory(categoryRaw);
@@ -819,10 +823,19 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
         update.quantity = parsed;
     }
 
-    // If request is multipart and includes images, upload and replace image slots.
-    if (Array.isArray(req.files) && req.files.length > 0) {
+    if (videoUrlRaw !== undefined) {
+        const trimmed = String(videoUrlRaw || "").trim();
+        update.video_url = trimmed ? trimmed : null;
+    }
+
+    const imageFiles = Array.isArray(req.files) ? req.files : Array.isArray(req.files?.images) ? req.files.images : [];
+    const videoFile = Array.isArray(req.files?.video) && req.files.video.length ? req.files.video[0] : null;
+
+    // If request is multipart and includes images/video, upload and replace.
+    if ((Array.isArray(imageFiles) && imageFiles.length > 0) || videoFile) {
         const bucket = getBucketName();
         const allowed = new Set(["image/jpeg", "image/png", "image/webp"]);
+        const allowedVideo = new Set(["video/mp4", "video/webm", "video/quicktime"]);
 
         const bucketCheck = await ensureBucketExists(bucket);
         if (!bucketCheck.ok) {
@@ -847,8 +860,8 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
         if (removeFlags.image3) nextImages.image3 = null;
         if (removeFlags.image4) nextImages.image4 = null;
 
-        for (let i = 0; i < Math.min(req.files.length, 4); i++) {
-            const file = req.files[i];
+        for (let i = 0; i < Math.min(imageFiles.length, 4); i++) {
+            const file = imageFiles[i];
             if (!allowed.has(file.mimetype)) {
                 return res.status(400).json({
                     error: "Only JPG/PNG/WEBP images are allowed",
@@ -888,6 +901,40 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
         }
 
         Object.assign(update, nextImages);
+
+        if (videoFile) {
+            if (!allowedVideo.has(videoFile.mimetype)) {
+                return res.status(400).json({
+                    error: "Only MP4/WEBM/MOV videos are allowed",
+                });
+            }
+
+            const vExt =
+                videoFile.mimetype === "video/webm"
+                    ? "webm"
+                    : videoFile.mimetype === "video/quicktime"
+                        ? "mov"
+                        : "mp4";
+            const vPath = `products/videos/${Date.now()}-${crypto.randomUUID()}.${vExt}`;
+
+            const { error: vErr } = await supabaseAdmin
+                .storage
+                .from(bucket)
+                .upload(vPath, videoFile.buffer, {
+                    contentType: videoFile.mimetype,
+                    upsert: false,
+                });
+
+            if (vErr) {
+                return res.status(500).json({
+                    error: vErr.message || "Video upload failed",
+                    hint: `Make sure Supabase Storage bucket '${bucket}' exists and is public (or policies allow uploads).`,
+                });
+            }
+
+            const { data: vPublic } = supabaseAdmin.storage.from(bucket).getPublicUrl(vPath);
+            update.video_url = vPublic?.publicUrl || null;
+        }
     } else {
         // JSON mode: accept image URLs directly (optional)
         const { image1, image2, image3, image4 } = req.body || {};
@@ -912,6 +959,7 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     delete fallbackUpdate.sku;
     delete fallbackUpdate.barcode;
     delete fallbackUpdate.quantity;
+    delete fallbackUpdate.video_url;
 
     const result = await updateWithFallback(
         "products",
@@ -946,6 +994,14 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
             ...updated,
             warning:
                 "Product updated, but cost fields (cost_inr/cost_usd) were NOT saved (DB missing columns). Run supabase-products-cost.sql in Supabase SQL editor.",
+        });
+    }
+
+    const requestedVideo = videoUrlRaw !== undefined || !!videoFile;
+    if (requestedVideo && result.usedFallback) {
+        return res.json({
+            ...updated,
+            warning: "Product updated, but video was NOT saved (DB missing products.video_url column). Run supabase-products-video.sql in Supabase SQL editor.",
         });
     }
 
