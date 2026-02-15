@@ -1334,7 +1334,7 @@ app.patch("/admin/orders/:id/status", requireAdmin, async (req, res) => {
 
     const raw = req.body?.status === undefined ? "" : String(req.body.status);
     const status = raw.trim().toLowerCase();
-    const allowed = new Set(["pending", "confirmed", "shipped", "delivered", "cancelled"]);
+    const allowed = new Set(["pending", "confirmed", "shipped", "delivered", "cancelled", "rto"]);
     if (!allowed.has(status)) {
         return res.status(400).json({
             error: "Invalid status",
