@@ -1272,6 +1272,42 @@ app.patch("/admin/orders/:id/status", requireAdmin, async (req, res) => {
     }
 });
 
+// 👉 ADMIN: delete an order (for removing fake/test orders)
+app.delete("/admin/orders/:id", requireAdmin, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    const orderId = req.params.id;
+    if (!/^\d+$/.test(String(orderId))) {
+        return res.status(400).json({ error: "Invalid order id" });
+    }
+
+    try {
+        const { data: deleted, error } = await supabaseAdmin
+            .from("orders")
+            .delete()
+            .eq("id", orderId)
+            .select("id")
+            .maybeSingle();
+
+        if (error) {
+            return res.status(400).json({ error: error.message || "Failed to delete order" });
+        }
+
+        if (!deleted) {
+            return res.status(404).json({ error: "Order not found" });
+        }
+
+        return res.json({ ok: true, deletedId: deleted.id });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to delete order" });
+    }
+});
+
 // 👉 CUSTOMER: request return within 7 days (requires customer login)
 app.post("/customer/orders/:id/return", requireCustomer, async (req, res) => {
     if (!supabaseAdmin) {
