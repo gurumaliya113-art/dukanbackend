@@ -489,6 +489,8 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
     const priceUsdRaw = req.body?.price_usd ?? req.body?.priceUsd;
     const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr ?? req.body?.mrp;
     const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
+    const costInrRaw = req.body?.cost_inr ?? req.body?.costInr;
+    const costUsdRaw = req.body?.cost_usd ?? req.body?.costUsd;
     const sizesRaw = req.body?.sizes;
     const skuRaw = req.body?.sku;
     const barcodeRaw = req.body?.barcode;
@@ -514,6 +516,8 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
     const parsedPriceUsd = parseNumberOrNull(priceUsdRaw);
     const parsedMrpInr = parseNumberOrNull(mrpInrRaw);
     const parsedMrpUsd = parseNumberOrNull(mrpUsdRaw);
+    const parsedCostInr = parseNumberOrNull(costInrRaw);
+    const parsedCostUsd = parseNumberOrNull(costUsdRaw);
     const parsedQuantity = quantityRaw !== undefined ? parseIntOrNull(quantityRaw) : null;
 
     if (!name || parsedPriceInr === null) {
@@ -631,6 +635,8 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
         price_usd: parsedPriceUsd,
         mrp_inr: parsedMrpInr,
         mrp_usd: parsedMrpUsd,
+        cost_inr: costInrRaw !== undefined ? parsedCostInr : null,
+        cost_usd: costUsdRaw !== undefined ? parsedCostUsd : null,
         description: description || null,
         sizes: parseProductSizesOrNull(sizesRaw),
         sku: skuRaw !== undefined && String(skuRaw).trim() ? String(skuRaw).trim() : null,
@@ -667,6 +673,15 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
             ...data,
             warning:
                 "Product saved, but inventory fields (sku/barcode/quantity) were NOT saved (DB missing columns). Run supabase-products-inventory.sql in Supabase SQL editor.",
+        });
+    }
+
+    const requestedCost = (costInrRaw !== undefined && String(costInrRaw).trim() !== "") || (costUsdRaw !== undefined && String(costUsdRaw).trim() !== "");
+    if (requestedCost && result.usedFallback) {
+        return res.status(201).json({
+            ...data,
+            warning:
+                "Product saved, but cost fields (cost_inr/cost_usd) were NOT saved (DB missing columns). Run supabase-products-cost.sql in Supabase SQL editor.",
         });
     }
 
@@ -722,6 +737,8 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     const priceUsdRaw = req.body?.price_usd ?? req.body?.priceUsd;
     const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr;
     const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
+    const costInrRaw = req.body?.cost_inr ?? req.body?.costInr;
+    const costUsdRaw = req.body?.cost_usd ?? req.body?.costUsd;
     const legacyPriceRaw = req.body?.price;
     const sizesRaw = req.body?.sizes;
     const skuRaw = req.body?.sku;
@@ -741,6 +758,8 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     const parsedPriceUsd = priceUsdRaw !== undefined ? parseNumberOrNull(priceUsdRaw) : null;
     const parsedMrpInr = mrpInrRaw !== undefined ? parseNumberOrNull(mrpInrRaw) : null;
     const parsedMrpUsd = mrpUsdRaw !== undefined ? parseNumberOrNull(mrpUsdRaw) : null;
+    const parsedCostInr = costInrRaw !== undefined ? parseNumberOrNull(costInrRaw) : null;
+    const parsedCostUsd = costUsdRaw !== undefined ? parseNumberOrNull(costUsdRaw) : null;
     const parsedLegacyPrice = legacyPriceRaw !== undefined ? parseNumberOrNull(legacyPriceRaw) : null;
 
     if (priceInrRaw !== undefined) {
@@ -764,6 +783,14 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
 
     if (mrpUsdRaw !== undefined) {
         update.mrp_usd = parsedMrpUsd;
+    }
+
+    if (costInrRaw !== undefined) {
+        update.cost_inr = parsedCostInr;
+    }
+
+    if (costUsdRaw !== undefined) {
+        update.cost_usd = parsedCostUsd;
     }
 
     if (description !== undefined) {
@@ -879,6 +906,8 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
     delete fallbackUpdate.price_usd;
     delete fallbackUpdate.mrp_inr;
     delete fallbackUpdate.mrp_usd;
+    delete fallbackUpdate.cost_inr;
+    delete fallbackUpdate.cost_usd;
     delete fallbackUpdate.sizes;
     delete fallbackUpdate.sku;
     delete fallbackUpdate.barcode;
@@ -908,6 +937,15 @@ app.put("/products/:id", requireAdmin, maybeUploadImages, async (req, res) => {
             ...updated,
             warning:
                 "Product updated, but inventory fields (sku/barcode/quantity) were NOT saved (DB missing columns). Run supabase-products-inventory.sql in Supabase SQL editor.",
+        });
+    }
+
+    const requestedCost = costInrRaw !== undefined || costUsdRaw !== undefined;
+    if (requestedCost && result.usedFallback) {
+        return res.json({
+            ...updated,
+            warning:
+                "Product updated, but cost fields (cost_inr/cost_usd) were NOT saved (DB missing columns). Run supabase-products-cost.sql in Supabase SQL editor.",
         });
     }
 
@@ -1373,6 +1411,83 @@ app.delete("/admin/orders/:id", requireAdmin, async (req, res) => {
     } catch (e) {
         return res.status(500).json({ error: e?.message || "Failed to delete order" });
     }
+});
+
+// 👉 ADMIN: update manual costs on an order (delivery/packing/ads/rto)
+app.patch("/admin/orders/:id/costs", requireAdmin, async (req, res) => {
+    if (!supabaseAdmin) {
+        return res.status(500).json({
+            error: "Server not configured for admin writes",
+            hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+        });
+    }
+
+    const orderId = req.params.id;
+    if (!/^\d+$/.test(String(orderId))) {
+        return res.status(400).json({ error: "Invalid order id" });
+    }
+
+    const body = req.body || {};
+    const deliveryCostRaw = body.deliveryCost;
+    const packingCostRaw = body.packingCost;
+    const adsCostRaw = body.adsCost;
+    const rtoCostRaw = body.rtoCost;
+
+    const patch = {
+        delivery_cost: deliveryCostRaw === undefined ? undefined : parseNumberOrNull(deliveryCostRaw),
+        packing_cost: packingCostRaw === undefined ? undefined : parseNumberOrNull(packingCostRaw),
+        ads_cost: adsCostRaw === undefined ? undefined : parseNumberOrNull(adsCostRaw),
+        rto_cost: rtoCostRaw === undefined ? undefined : parseNumberOrNull(rtoCostRaw),
+    };
+
+    Object.keys(patch).forEach((k) => {
+        if (patch[k] === undefined) delete patch[k];
+    });
+
+    const vals = [patch.delivery_cost, patch.packing_cost, patch.ads_cost, patch.rto_cost].filter((v) => v !== undefined);
+    for (const v of vals) {
+        if (v !== null && (!Number.isFinite(v) || v < 0)) {
+            return res.status(400).json({ error: "Costs must be non-negative numbers (or empty)" });
+        }
+    }
+
+    if (Object.keys(patch).length === 0) {
+        return res.status(400).json({ error: "No fields to update" });
+    }
+
+    const fallbackPatch = { ...patch };
+    delete fallbackPatch.delivery_cost;
+    delete fallbackPatch.packing_cost;
+    delete fallbackPatch.ads_cost;
+    delete fallbackPatch.rto_cost;
+
+    const result = await updateWithFallback(
+        "orders",
+        patch,
+        { id: orderId },
+        fallbackPatch
+    );
+
+    const { data: updated, error } = result;
+    if (error) {
+        if (isMissingColumnError(error)) {
+            return res.status(400).json({
+                error: error.message,
+                hint: "Run backend/supabase-orders-costs.sql in Supabase SQL Editor to add cost columns.",
+            });
+        }
+        return res.status(400).json({ error: error.message || "Failed to update costs" });
+    }
+
+    const requestedAny = deliveryCostRaw !== undefined || packingCostRaw !== undefined || adsCostRaw !== undefined || rtoCostRaw !== undefined;
+    if (requestedAny && result.usedFallback) {
+        return res.json({
+            ...updated,
+            warning: "Order updated, but cost fields were NOT saved (DB missing columns). Run supabase-orders-costs.sql in Supabase SQL editor.",
+        });
+    }
+
+    return res.json(updated);
 });
 
 // 👉 CUSTOMER: request return within 7 days (requires customer login)
