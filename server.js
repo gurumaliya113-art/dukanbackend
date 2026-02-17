@@ -385,7 +385,7 @@ app.get("/admin/manual-payments", requireAdmin, async (req, res) => {
 
         const { data, error } = await supabaseAdmin
             .from("manual_payments")
-            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
+            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,delivery_partner_to,paypal_to,upi_whatsapp_to,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
             .eq("region", region)
             .eq("pay_date", date)
             .maybeSingle();
@@ -419,7 +419,7 @@ app.get("/admin/manual-payments/recent", requireAdmin, async (req, res) => {
 
         const { data, error } = await supabaseAdmin
             .from("manual_payments")
-            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
+            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,delivery_partner_to,paypal_to,upi_whatsapp_to,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
             .eq("region", region)
             .order("pay_date", { ascending: false })
             .limit(limit);
@@ -434,6 +434,194 @@ app.get("/admin/manual-payments/recent", requireAdmin, async (req, res) => {
         return res.json({ ok: true, entries: Array.isArray(data) ? data : [] });
     } catch (e) {
         return res.status(500).json({ error: e?.message || "Manual payments list failed" });
+    }
+});
+
+app.get("/admin/manual-payments/summary", requireAdmin, async (req, res) => {
+    try {
+        if (!supabaseAdmin) {
+            return res.status(500).json({
+                error: "Server not configured for admin writes",
+                hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+            });
+        }
+
+        const region = parseRegion(req.query.region);
+        if (!region) return res.status(400).json({ error: "Invalid region (use IN or USA)" });
+
+        // Page through results to avoid PostgREST row limits.
+        const pageSize = 1000;
+        let from = 0;
+        let to = pageSize - 1;
+        let totalBank = 0;
+        let totalHand = 0;
+        let rows = 0;
+
+        while (true) {
+            const { data, error } = await supabaseAdmin
+                .from("manual_payments")
+                .select("cash_in_bank_inr,cash_in_hand_inr")
+                .eq("region", region)
+                .range(from, to);
+
+            if (error) {
+                return res.status(500).json({
+                    error: error.message || "Failed to summarize manual payments",
+                    hint: "Run backend/supabase-manual-payments.sql in Supabase SQL editor.",
+                });
+            }
+
+            const list = Array.isArray(data) ? data : [];
+            list.forEach((r) => {
+                const b = Number(r?.cash_in_bank_inr);
+                const h = Number(r?.cash_in_hand_inr);
+                if (Number.isFinite(b)) totalBank += b;
+                if (Number.isFinite(h)) totalHand += h;
+            });
+            rows += list.length;
+
+            if (list.length < pageSize) break;
+            from += pageSize;
+            to += pageSize;
+            if (from > 50000) break; // safety cap
+        }
+
+        // Subtract takeouts
+        let takeoutBank = 0;
+        let takeoutHand = 0;
+        let takeoutRows = 0;
+        from = 0;
+        to = pageSize - 1;
+
+        while (true) {
+            const { data, error } = await supabaseAdmin
+                .from("cash_takeouts")
+                .select("source,amount_inr")
+                .eq("region", region)
+                .range(from, to);
+
+            if (error) {
+                // If table not created yet, do not fail summary.
+                break;
+            }
+
+            const list = Array.isArray(data) ? data : [];
+            list.forEach((r) => {
+                const amount = Number(r?.amount_inr);
+                if (!Number.isFinite(amount)) return;
+                const src = String(r?.source || "").toLowerCase();
+                if (src === "hand") takeoutHand += Math.max(0, amount);
+                else takeoutBank += Math.max(0, amount);
+            });
+            takeoutRows += list.length;
+
+            if (list.length < pageSize) break;
+            from += pageSize;
+            to += pageSize;
+            if (from > 50000) break;
+        }
+
+        const netBank = totalBank - takeoutBank;
+        const netHand = totalHand - takeoutHand;
+
+        return res.json({
+            ok: true,
+            region,
+            totals: {
+                cash_in_bank_inr: netBank,
+                cash_in_hand_inr: netHand,
+                manual_rows: rows,
+                takeout_rows: takeoutRows,
+                takeout_bank_inr: takeoutBank,
+                takeout_hand_inr: takeoutHand,
+            },
+        });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Manual payments summary failed" });
+    }
+});
+
+// 👉 ADMIN: cash takeouts
+app.get("/admin/cash-takeouts/recent", requireAdmin, async (req, res) => {
+    try {
+        if (!supabaseAdmin) {
+            return res.status(500).json({
+                error: "Server not configured for admin writes",
+                hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+            });
+        }
+
+        const region = parseRegion(req.query.region) || "IN";
+        const limitRaw = Number(req.query.limit);
+        const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, Math.trunc(limitRaw))) : 50;
+
+        const { data, error } = await supabaseAdmin
+            .from("cash_takeouts")
+            .select("id,region,take_date,source,amount_inr,purpose,created_at,updated_at")
+            .eq("region", region)
+            .order("take_date", { ascending: false })
+            .order("id", { ascending: false })
+            .limit(limit);
+
+        if (error) {
+            return res.status(500).json({
+                error: error.message || "Failed to load cash takeouts",
+                hint: "Run backend/supabase-manual-payments.sql in Supabase SQL editor.",
+            });
+        }
+
+        return res.json({ ok: true, takeouts: Array.isArray(data) ? data : [] });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Cash takeouts list failed" });
+    }
+});
+
+app.post("/admin/cash-takeouts", requireAdmin, async (req, res) => {
+    try {
+        if (!supabaseAdmin) {
+            return res.status(500).json({
+                error: "Server not configured for admin writes",
+                hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+            });
+        }
+
+        const body = req.body || {};
+        const region = parseRegion(body.region) || "IN";
+        const date = parseYmdDate(body.date);
+        const source = String(body.source || "").toLowerCase() === "hand" ? "hand" : "bank";
+        const purpose = String(body.purpose || "").trim();
+        const amount = toNonNegativeNumber(body.amountInr);
+
+        if (!date) return res.status(400).json({ error: "Invalid date (use YYYY-MM-DD)" });
+        if (!purpose) return res.status(400).json({ error: "Purpose required" });
+        if (!amount) return res.status(400).json({ error: "Amount must be > 0" });
+
+        const row = {
+            region,
+            take_date: date,
+            source,
+            amount_inr: amount,
+            purpose,
+            created_by: req.admin?.id || null,
+            updated_by: req.admin?.id || null,
+        };
+
+        const { data, error } = await supabaseAdmin
+            .from("cash_takeouts")
+            .insert([row])
+            .select("id,region,take_date,source,amount_inr,purpose,created_at,updated_at")
+            .single();
+
+        if (error) {
+            return res.status(500).json({
+                error: error.message || "Failed to save cash takeout",
+                hint: "Run backend/supabase-manual-payments.sql in Supabase SQL editor.",
+            });
+        }
+
+        return res.json({ ok: true, takeout: data });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Cash takeout save failed" });
     }
 });
 
@@ -458,6 +646,9 @@ app.post("/admin/manual-payments", requireAdmin, async (req, res) => {
             delivery_partner_inr: toNonNegativeNumber(body.deliveryPartnerInr),
             paypal_inr: toNonNegativeNumber(body.paypalInr),
             upi_whatsapp_inr: toNonNegativeNumber(body.upiWhatsappInr),
+            delivery_partner_to: String(body.deliveryPartnerTo || "bank").toLowerCase() === "hand" ? "hand" : "bank",
+            paypal_to: String(body.paypalTo || "bank").toLowerCase() === "hand" ? "hand" : "bank",
+            upi_whatsapp_to: String(body.upiWhatsappTo || "bank").toLowerCase() === "hand" ? "hand" : "bank",
             cash_in_bank_inr: toNonNegativeNumber(body.cashInBankInr),
             cash_in_hand_inr: toNonNegativeNumber(body.cashInHandInr),
             updated_by: req.admin?.id || null,
@@ -482,7 +673,7 @@ app.post("/admin/manual-payments", requireAdmin, async (req, res) => {
         const { data, error } = await supabaseAdmin
             .from("manual_payments")
             .upsert([row], { onConflict: "region,pay_date" })
-            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
+            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,delivery_partner_to,paypal_to,upi_whatsapp_to,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
             .single();
 
         if (error) {
