@@ -368,6 +368,44 @@ const toNonNegativeNumber = (value) => {
     return Math.max(0, n);
 };
 
+// Money helpers (avoid floating-point drift)
+const toPaise = (value) => {
+    if (value === undefined || value === null || value === "") return 0;
+    const raw = String(value).trim();
+    if (!raw) return 0;
+
+    const neg = raw.startsWith("-");
+    const s = neg ? raw.slice(1) : raw;
+    if (!/^\d+(?:\.\d+)?$/.test(s)) {
+        const n = Number(raw);
+        if (!Number.isFinite(n)) return 0;
+        return Math.max(0, Math.round(n * 100));
+    }
+
+    const parts = s.split(".");
+    const whole = parts[0] || "0";
+    const frac = parts[1] || "";
+    const frac3 = (frac + "000").slice(0, 3);
+    const cents = parseInt(frac3.slice(0, 2), 10) || 0;
+    const roundDigit = parseInt(frac3.slice(2, 3), 10) || 0;
+    let paise = (parseInt(whole, 10) || 0) * 100 + cents + (roundDigit >= 5 ? 1 : 0);
+    if (neg) paise = -paise;
+    if (!Number.isFinite(paise)) return 0;
+    return Math.max(0, Math.trunc(paise));
+};
+
+const toMoneyStr2 = (value) => {
+    const p = toPaise(value);
+    return (p / 100).toFixed(2);
+};
+
+const paiseToMoneyStr2 = (paise) => {
+    const p = Number.isFinite(Number(paise)) ? Math.max(0, Math.trunc(Number(paise))) : 0;
+    const whole = Math.trunc(p / 100);
+    const frac = String(p % 100).padStart(2, "0");
+    return `${whole}.${frac}`;
+};
+
 // 👉 ADMIN: manual payments (daily)
 app.get("/admin/manual-payments", requireAdmin, async (req, res) => {
     try {
@@ -453,8 +491,8 @@ app.get("/admin/manual-payments/summary", requireAdmin, async (req, res) => {
         const pageSize = 1000;
         let from = 0;
         let to = pageSize - 1;
-        let totalBank = 0;
-        let totalHand = 0;
+        let totalBankPaise = 0;
+        let totalHandPaise = 0;
         let rows = 0;
 
         while (true) {
@@ -473,10 +511,8 @@ app.get("/admin/manual-payments/summary", requireAdmin, async (req, res) => {
 
             const list = Array.isArray(data) ? data : [];
             list.forEach((r) => {
-                const b = Number(r?.cash_in_bank_inr);
-                const h = Number(r?.cash_in_hand_inr);
-                if (Number.isFinite(b)) totalBank += b;
-                if (Number.isFinite(h)) totalHand += h;
+                totalBankPaise += toPaise(r?.cash_in_bank_inr);
+                totalHandPaise += toPaise(r?.cash_in_hand_inr);
             });
             rows += list.length;
 
@@ -487,8 +523,8 @@ app.get("/admin/manual-payments/summary", requireAdmin, async (req, res) => {
         }
 
         // Subtract takeouts
-        let takeoutBank = 0;
-        let takeoutHand = 0;
+        let takeoutBankPaise = 0;
+        let takeoutHandPaise = 0;
         let takeoutRows = 0;
         from = 0;
         to = pageSize - 1;
@@ -507,11 +543,10 @@ app.get("/admin/manual-payments/summary", requireAdmin, async (req, res) => {
 
             const list = Array.isArray(data) ? data : [];
             list.forEach((r) => {
-                const amount = Number(r?.amount_inr);
-                if (!Number.isFinite(amount)) return;
+                const amountPaise = toPaise(r?.amount_inr);
                 const src = String(r?.source || "").toLowerCase();
-                if (src === "hand") takeoutHand += Math.max(0, amount);
-                else takeoutBank += Math.max(0, amount);
+                if (src === "hand") takeoutHandPaise += amountPaise;
+                else takeoutBankPaise += amountPaise;
             });
             takeoutRows += list.length;
 
@@ -521,19 +556,20 @@ app.get("/admin/manual-payments/summary", requireAdmin, async (req, res) => {
             if (from > 50000) break;
         }
 
-        const netBank = totalBank - takeoutBank;
-        const netHand = totalHand - takeoutHand;
+        const netBankPaise = Math.max(0, totalBankPaise - takeoutBankPaise);
+        const netHandPaise = Math.max(0, totalHandPaise - takeoutHandPaise);
 
         return res.json({
             ok: true,
             region,
             totals: {
-                cash_in_bank_inr: netBank,
-                cash_in_hand_inr: netHand,
+                // return as fixed-2 strings to avoid JSON float drift on clients
+                cash_in_bank_inr: paiseToMoneyStr2(netBankPaise),
+                cash_in_hand_inr: paiseToMoneyStr2(netHandPaise),
                 manual_rows: rows,
                 takeout_rows: takeoutRows,
-                takeout_bank_inr: takeoutBank,
-                takeout_hand_inr: takeoutHand,
+                takeout_bank_inr: paiseToMoneyStr2(takeoutBankPaise),
+                takeout_hand_inr: paiseToMoneyStr2(takeoutHandPaise),
             },
         });
     } catch (e) {
@@ -590,7 +626,7 @@ app.post("/admin/cash-takeouts", requireAdmin, async (req, res) => {
         const date = parseYmdDate(body.date);
         const source = String(body.source || "").toLowerCase() === "hand" ? "hand" : "bank";
         const purpose = String(body.purpose || "").trim();
-        const amount = toNonNegativeNumber(body.amountInr);
+        const amount = toPaise(body.amountInr);
 
         if (!date) return res.status(400).json({ error: "Invalid date (use YYYY-MM-DD)" });
         if (!purpose) return res.status(400).json({ error: "Purpose required" });
@@ -600,7 +636,7 @@ app.post("/admin/cash-takeouts", requireAdmin, async (req, res) => {
             region,
             take_date: date,
             source,
-            amount_inr: amount,
+            amount_inr: paiseToMoneyStr2(amount),
             purpose,
             created_by: req.admin?.id || null,
             updated_by: req.admin?.id || null,
@@ -640,17 +676,38 @@ app.post("/admin/manual-payments", requireAdmin, async (req, res) => {
         if (!region) return res.status(400).json({ error: "Invalid region (use IN or USA)" });
         if (!date) return res.status(400).json({ error: "Invalid date (use YYYY-MM-DD)" });
 
+        const deliveryPartnerTo =
+            String(body.deliveryPartnerTo || "bank").toLowerCase() === "hand" ? "hand" : "bank";
+        const paypalTo = String(body.paypalTo || "bank").toLowerCase() === "hand" ? "hand" : "bank";
+        const upiWhatsappTo =
+            String(body.upiWhatsappTo || "bank").toLowerCase() === "hand" ? "hand" : "bank";
+
+        const deliveryPartnerPaise = toPaise(body.deliveryPartnerInr);
+        const paypalPaise = toPaise(body.paypalInr);
+        const upiWhatsappPaise = toPaise(body.upiWhatsappInr);
+
+        const cashBankPaise =
+            (deliveryPartnerTo === "bank" ? deliveryPartnerPaise : 0) +
+            (paypalTo === "bank" ? paypalPaise : 0) +
+            (upiWhatsappTo === "bank" ? upiWhatsappPaise : 0);
+
+        const cashHandPaise =
+            (deliveryPartnerTo === "hand" ? deliveryPartnerPaise : 0) +
+            (paypalTo === "hand" ? paypalPaise : 0) +
+            (upiWhatsappTo === "hand" ? upiWhatsappPaise : 0);
+
         const row = {
             region,
             pay_date: date,
-            delivery_partner_inr: toNonNegativeNumber(body.deliveryPartnerInr),
-            paypal_inr: toNonNegativeNumber(body.paypalInr),
-            upi_whatsapp_inr: toNonNegativeNumber(body.upiWhatsappInr),
-            delivery_partner_to: String(body.deliveryPartnerTo || "bank").toLowerCase() === "hand" ? "hand" : "bank",
-            paypal_to: String(body.paypalTo || "bank").toLowerCase() === "hand" ? "hand" : "bank",
-            upi_whatsapp_to: String(body.upiWhatsappTo || "bank").toLowerCase() === "hand" ? "hand" : "bank",
-            cash_in_bank_inr: toNonNegativeNumber(body.cashInBankInr),
-            cash_in_hand_inr: toNonNegativeNumber(body.cashInHandInr),
+            // store exact fixed-2 values derived from paise (not floats)
+            delivery_partner_inr: paiseToMoneyStr2(deliveryPartnerPaise),
+            paypal_inr: paiseToMoneyStr2(paypalPaise),
+            upi_whatsapp_inr: paiseToMoneyStr2(upiWhatsappPaise),
+            delivery_partner_to: deliveryPartnerTo,
+            paypal_to: paypalTo,
+            upi_whatsapp_to: upiWhatsappTo,
+            cash_in_bank_inr: paiseToMoneyStr2(cashBankPaise),
+            cash_in_hand_inr: paiseToMoneyStr2(cashHandPaise),
             updated_by: req.admin?.id || null,
         };
 
