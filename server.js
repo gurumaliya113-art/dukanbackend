@@ -349,6 +349,155 @@ app.get("/admin/me", requireAdmin, (req, res) => {
     return res.json({ ok: true, admin: req.admin });
 });
 
+const parseRegion = (value) => {
+    const v = String(value || "").trim().toUpperCase();
+    if (v === "IN" || v === "USA") return v;
+    return "";
+};
+
+const parseYmdDate = (value) => {
+    const s = String(value || "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return "";
+    // Let Postgres validate actual date; just basic format check here.
+    return s;
+};
+
+const toNonNegativeNumber = (value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, n);
+};
+
+// 👉 ADMIN: manual payments (daily)
+app.get("/admin/manual-payments", requireAdmin, async (req, res) => {
+    try {
+        if (!supabaseAdmin) {
+            return res.status(500).json({
+                error: "Server not configured for admin writes",
+                hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+            });
+        }
+
+        const region = parseRegion(req.query.region);
+        const date = parseYmdDate(req.query.date);
+        if (!region) return res.status(400).json({ error: "Invalid region (use IN or USA)" });
+        if (!date) return res.status(400).json({ error: "Invalid date (use YYYY-MM-DD)" });
+
+        const { data, error } = await supabaseAdmin
+            .from("manual_payments")
+            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
+            .eq("region", region)
+            .eq("pay_date", date)
+            .maybeSingle();
+
+        if (error) {
+            return res.status(500).json({
+                error: error.message || "Failed to load manual payment",
+                hint: "Run backend/supabase-manual-payments.sql in Supabase SQL editor.",
+            });
+        }
+
+        return res.json({ ok: true, entry: data || null });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Manual payments fetch failed" });
+    }
+});
+
+app.get("/admin/manual-payments/recent", requireAdmin, async (req, res) => {
+    try {
+        if (!supabaseAdmin) {
+            return res.status(500).json({
+                error: "Server not configured for admin writes",
+                hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+            });
+        }
+
+        const region = parseRegion(req.query.region);
+        const limitRaw = Number(req.query.limit);
+        const limit = Number.isFinite(limitRaw) ? Math.min(200, Math.max(1, Math.trunc(limitRaw))) : 30;
+        if (!region) return res.status(400).json({ error: "Invalid region (use IN or USA)" });
+
+        const { data, error } = await supabaseAdmin
+            .from("manual_payments")
+            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
+            .eq("region", region)
+            .order("pay_date", { ascending: false })
+            .limit(limit);
+
+        if (error) {
+            return res.status(500).json({
+                error: error.message || "Failed to load manual payments",
+                hint: "Run backend/supabase-manual-payments.sql in Supabase SQL editor.",
+            });
+        }
+
+        return res.json({ ok: true, entries: Array.isArray(data) ? data : [] });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Manual payments list failed" });
+    }
+});
+
+app.post("/admin/manual-payments", requireAdmin, async (req, res) => {
+    try {
+        if (!supabaseAdmin) {
+            return res.status(500).json({
+                error: "Server not configured for admin writes",
+                hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+            });
+        }
+
+        const body = req.body || {};
+        const region = parseRegion(body.region);
+        const date = parseYmdDate(body.date);
+        if (!region) return res.status(400).json({ error: "Invalid region (use IN or USA)" });
+        if (!date) return res.status(400).json({ error: "Invalid date (use YYYY-MM-DD)" });
+
+        const row = {
+            region,
+            pay_date: date,
+            delivery_partner_inr: toNonNegativeNumber(body.deliveryPartnerInr),
+            paypal_inr: toNonNegativeNumber(body.paypalInr),
+            upi_whatsapp_inr: toNonNegativeNumber(body.upiWhatsappInr),
+            cash_in_bank_inr: toNonNegativeNumber(body.cashInBankInr),
+            cash_in_hand_inr: toNonNegativeNumber(body.cashInHandInr),
+            updated_by: req.admin?.id || null,
+        };
+
+        // If new row is inserted, set created_by too.
+        const { data: existing, error: existingError } = await supabaseAdmin
+            .from("manual_payments")
+            .select("id")
+            .eq("region", region)
+            .eq("pay_date", date)
+            .maybeSingle();
+
+        if (existingError) {
+            return res.status(500).json({ error: existingError.message || "Lookup failed" });
+        }
+
+        if (!existing) {
+            row.created_by = req.admin?.id || null;
+        }
+
+        const { data, error } = await supabaseAdmin
+            .from("manual_payments")
+            .upsert([row], { onConflict: "region,pay_date" })
+            .select("id,region,pay_date,delivery_partner_inr,paypal_inr,upi_whatsapp_inr,cash_in_bank_inr,cash_in_hand_inr,created_at,updated_at")
+            .single();
+
+        if (error) {
+            return res.status(500).json({
+                error: error.message || "Failed to save manual payment",
+                hint: "Run backend/supabase-manual-payments.sql in Supabase SQL editor.",
+            });
+        }
+
+        return res.json({ ok: true, entry: data });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Manual payments save failed" });
+    }
+});
+
 // 👉 ADMIN: create a new admin account (invite-code protected)
 app.post("/admin/create", async (req, res) => {
     const { email, password, inviteCode } = req.body || {};
