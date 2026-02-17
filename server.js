@@ -371,8 +371,21 @@ const toNonNegativeNumber = (value) => {
 // Money helpers (avoid floating-point drift)
 const toPaise = (value) => {
     if (value === undefined || value === null || value === "") return 0;
-    const raw = String(value).trim();
+    const raw0 = String(value).trim();
+    if (!raw0) return 0;
+
+    // Normalize common formats:
+    // - remove currency symbols/letters/spaces
+    // - support thousand separators (",1,234.50" -> "1234.50")
+    // - support comma decimal ("140,50" -> "140.50")
+    let raw = raw0.replace(/\s+/g, "");
+    raw = raw.replace(/[^0-9,\.\-+]/g, "");
     if (!raw) return 0;
+    if (raw.includes(",") && raw.includes(".")) raw = raw.replace(/,/g, "");
+    else if (raw.includes(",") && !raw.includes(".")) raw = raw.replace(/,/g, ".");
+    if (raw.startsWith("+")) raw = raw.slice(1);
+    if (raw.startsWith("-.")) raw = raw.replace("-.", "-0.");
+    if (raw.startsWith(".")) raw = `0${raw}`;
 
     const neg = raw.startsWith("-");
     const s = neg ? raw.slice(1) : raw;

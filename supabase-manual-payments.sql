@@ -7,9 +7,9 @@ create table if not exists public.manual_payments (
   pay_date date not null,
 
   -- Received today (store in INR per current UI)
-  delivery_partner_inr numeric not null default 0,
-  paypal_inr numeric not null default 0,
-  upi_whatsapp_inr numeric not null default 0,
+  delivery_partner_inr numeric(14,2) not null default 0,
+  paypal_inr numeric(14,2) not null default 0,
+  upi_whatsapp_inr numeric(14,2) not null default 0,
 
   -- Where each received amount was placed
   delivery_partner_to text not null default 'bank' check (delivery_partner_to in ('bank','hand')),
@@ -17,14 +17,22 @@ create table if not exists public.manual_payments (
   upi_whatsapp_to text not null default 'bank' check (upi_whatsapp_to in ('bank','hand')),
 
   -- Cash placement
-  cash_in_bank_inr numeric not null default 0,
-  cash_in_hand_inr numeric not null default 0,
+  cash_in_bank_inr numeric(14,2) not null default 0,
+  cash_in_hand_inr numeric(14,2) not null default 0,
 
   created_by uuid null,
   updated_by uuid null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- Ensure 2-decimal scale on existing installs too (safe rounding).
+alter table public.manual_payments
+  alter column delivery_partner_inr type numeric(14,2) using round(delivery_partner_inr::numeric, 2),
+  alter column paypal_inr type numeric(14,2) using round(paypal_inr::numeric, 2),
+  alter column upi_whatsapp_inr type numeric(14,2) using round(upi_whatsapp_inr::numeric, 2),
+  alter column cash_in_bank_inr type numeric(14,2) using round(cash_in_bank_inr::numeric, 2),
+  alter column cash_in_hand_inr type numeric(14,2) using round(cash_in_hand_inr::numeric, 2);
 
 -- Backfill columns for existing installations
 alter table public.manual_payments add column if not exists delivery_partner_to text;
@@ -51,6 +59,41 @@ alter table public.manual_payments add constraint manual_payments_paypal_to_chec
 
 alter table public.manual_payments drop constraint if exists manual_payments_upi_whatsapp_to_check;
 alter table public.manual_payments add constraint manual_payments_upi_whatsapp_to_check check (upi_whatsapp_to in ('bank','hand'));
+
+-- Backfill cash placement based on bucket selections.
+-- This enforces the simple concept: each entry goes to either bank or hand.
+update public.manual_payments
+set
+  cash_in_bank_inr =
+    (case when delivery_partner_to = 'bank' then delivery_partner_inr else 0 end) +
+    (case when paypal_to = 'bank' then paypal_inr else 0 end) +
+    (case when upi_whatsapp_to = 'bank' then upi_whatsapp_inr else 0 end),
+  cash_in_hand_inr =
+    (case when delivery_partner_to = 'hand' then delivery_partner_inr else 0 end) +
+    (case when paypal_to = 'hand' then paypal_inr else 0 end) +
+    (case when upi_whatsapp_to = 'hand' then upi_whatsapp_inr else 0 end);
+
+-- DB-level invariants (prevents missing/mismatched totals)
+alter table public.manual_payments drop constraint if exists manual_payments_cash_split_check;
+alter table public.manual_payments add constraint manual_payments_cash_split_check check (
+  cash_in_bank_inr + cash_in_hand_inr = delivery_partner_inr + paypal_inr + upi_whatsapp_inr
+);
+
+alter table public.manual_payments drop constraint if exists manual_payments_cash_bank_matches_alloc_check;
+alter table public.manual_payments add constraint manual_payments_cash_bank_matches_alloc_check check (
+  cash_in_bank_inr =
+    (case when delivery_partner_to = 'bank' then delivery_partner_inr else 0 end) +
+    (case when paypal_to = 'bank' then paypal_inr else 0 end) +
+    (case when upi_whatsapp_to = 'bank' then upi_whatsapp_inr else 0 end)
+);
+
+alter table public.manual_payments drop constraint if exists manual_payments_cash_hand_matches_alloc_check;
+alter table public.manual_payments add constraint manual_payments_cash_hand_matches_alloc_check check (
+  cash_in_hand_inr =
+    (case when delivery_partner_to = 'hand' then delivery_partner_inr else 0 end) +
+    (case when paypal_to = 'hand' then paypal_inr else 0 end) +
+    (case when upi_whatsapp_to = 'hand' then upi_whatsapp_inr else 0 end)
+);
 
 create unique index if not exists manual_payments_region_date_uidx
   on public.manual_payments (region, pay_date);
@@ -82,13 +125,19 @@ create table if not exists public.cash_takeouts (
   region text not null default 'IN' check (region in ('IN','USA')),
   take_date date not null,
   source text not null check (source in ('bank','hand')),
-  amount_inr numeric not null default 0,
+  amount_inr numeric(14,2) not null default 0,
   purpose text not null,
   created_by uuid null,
   updated_by uuid null,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.cash_takeouts
+  alter column amount_inr type numeric(14,2) using round(amount_inr::numeric, 2);
+
+alter table public.cash_takeouts drop constraint if exists cash_takeouts_amount_nonneg;
+alter table public.cash_takeouts add constraint cash_takeouts_amount_nonneg check (amount_inr >= 0);
 
 create index if not exists cash_takeouts_region_date_idx
   on public.cash_takeouts (region, take_date desc);
