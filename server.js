@@ -1,3 +1,47 @@
+// BLOG CRUD ENDPOINTS
+// List blogs
+app.get("/blogs", async (req, res) => {
+    const { data, error } = await supabasePublic.from("blogs").select("*").order("published_at", { ascending: false });
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data);
+});
+
+// Get blog by slug
+app.get("/blogs/:slug", async (req, res) => {
+    const { slug } = req.params;
+    const { data, error } = await supabasePublic.from("blogs").select("*").eq("slug", slug).single();
+    if (error) return res.status(404).json({ error: "Blog not found" });
+    res.json(data);
+});
+
+// Create blog (admin)
+app.post("/blogs", requireAdmin, async (req, res) => {
+    const { title, content, summary, image_url, author } = req.body;
+    if (!title || !content) return res.status(400).json({ error: "Title and content required" });
+    const slug = (title || "").toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-').replace(/-+/g, '-');
+    const { data, error } = await supabaseAdmin.from("blogs").insert([{ title, slug, content, summary, image_url, author }]).select("*").single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.status(201).json(data);
+});
+
+// Edit blog (admin)
+app.put("/blogs/:id", requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { title, content, summary, image_url, author } = req.body;
+    if (!title || !content) return res.status(400).json({ error: "Title and content required" });
+    const slug = (title || "").toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-').replace(/-+/g, '-');
+    const { data, error } = await supabaseAdmin.from("blogs").update({ title, slug, content, summary, image_url, author, updated_at: new Date().toISOString() }).eq("id", id).select("*").single();
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data);
+});
+
+// Delete blog (admin)
+app.delete("/blogs/:id", requireAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { error } = await supabaseAdmin.from("blogs").delete().eq("id", id);
+    if (error) return res.status(500).json({ error: error.message });
+    res.json({ success: true });
+});
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
