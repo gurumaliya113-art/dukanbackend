@@ -1,3 +1,82 @@
+const express = require("express");
+const cors = require("cors");
+const multer = require("multer");
+const crypto = require("crypto");
+const axios = require("axios");
+const fs = require("fs");
+const path = require("path");
+const { supabasePublic, supabaseAdmin } = require("./supabaseClients");
+
+const app = express();
+
+// Middleware
+app.use(cors({ origin: true }));
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// Helper functions and middleware
+const getBearerToken = (req) => {
+    const header = req.headers.authorization || req.headers.Authorization || "";
+    const value = Array.isArray(header) ? header[0] : String(header);
+    if (value.toLowerCase().startsWith("bearer ")) return value.slice(7).trim();
+    return "";
+};
+
+const requireAdmin = async (req, res, next) => {
+    try {
+        if (!supabaseAdmin) {
+            return res.status(500).json({
+                error: "Server not configured for admin writes",
+                hint: "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
+            });
+        }
+
+        const token = getBearerToken(req);
+        if (!token) {
+            return res.status(401).json({ error: "Missing Authorization bearer token" });
+        }
+
+        const { data: userData, error: userError } = await supabasePublic.auth.getUser(token);
+        if (userError || !userData?.user) {
+            return res.status(401).json({ error: "Invalid or expired token" });
+        }
+
+        const user = userData.user;
+        const { data: adminRow, error: adminError } = await supabaseAdmin.from("admin_users").select("user_id,email").eq("user_id", user.id).maybeSingle();
+
+        if (adminError) {
+            return res.status(500).json({
+                error: adminError.message || "Admin lookup failed",
+                hint: "Create the 'admin_users' table in Supabase (SQL provided in setup notes).",
+            });
+        }
+
+        if (!adminRow) {
+            return res.status(403).json({ error: "Not an admin" });
+        }
+
+        req.admin = { id: user.id, email: adminRow.email || user.email || null };
+        return next();
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Admin auth failed" });
+    }
+};
+
+const slugify = (input) => {
+    const s = input === undefined || input === null ? "" : String(input);
+    return s
+        .toLowerCase()
+        .replace(/[^a-z0-9\s-]/g, "")
+        .trim()
+        .replace(/\s+/g, "-")
+        .replace(/-+/g, "-");
+};
+
+// BLOG CRUD ENDPOINTS
+
+
+
+
 // BLOG CRUD ENDPOINTS
 // List blogs
 app.get("/blogs", async (req, res) => {
@@ -21,99 +100,270 @@ app.post("/blogs", requireAdmin, async (req, res) => {
     const slug = (title || "").toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-').replace(/-+/g, '-');
     const { data, error } = await supabaseAdmin.from("blogs").insert([{ title, slug, content, summary, image_url, author }]).select("*").single();
     if (error) return res.status(500).json({ error: error.message });
-    res.status(201).json(data);
+
+    return res.status(201).json({ ok: true, blog: data });
 });
 
-// Edit blog (admin)
+// Update blog by id (admin)
 app.put("/blogs/:id", requireAdmin, async (req, res) => {
     const { id } = req.params;
     const { title, content, summary, image_url, author } = req.body;
+
+    if (!id) return res.status(400).json({ error: "Missing blog id" });
     if (!title || !content) return res.status(400).json({ error: "Title and content required" });
+
+    // Keep slug stable unless title changes; if it changes, update slug too.
     const slug = (title || "").toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/\s+/g, '-').replace(/-+/g, '-');
-    const { data, error } = await supabaseAdmin.from("blogs").update({ title, slug, content, summary, image_url, author, updated_at: new Date().toISOString() }).eq("id", id).select("*").single();
+
+    const { data, error } = await supabaseAdmin
+        .from("blogs")
+        .update({ title, slug, content, summary, image_url, author })
+        .eq("id", id)
+        .select("*")
+        .single();
+
     if (error) return res.status(500).json({ error: error.message });
-    res.json(data);
+    if (!data) return res.status(404).json({ error: "Blog not found" });
+    return res.json({ ok: true, blog: data });
 });
 
-// Delete blog (admin)
+// Delete blog by id (admin)
 app.delete("/blogs/:id", requireAdmin, async (req, res) => {
     const { id } = req.params;
-    const { error } = await supabaseAdmin.from("blogs").delete().eq("id", id);
+    if (!id) return res.status(400).json({ error: "Missing blog id" });
+
+    const { data, error } = await supabaseAdmin
+        .from("blogs")
+        .delete()
+        .eq("id", id)
+        .select("id")
+        .maybeSingle();
+
     if (error) return res.status(500).json({ error: error.message });
-    res.json({ success: true });
+    if (!data) return res.status(404).json({ error: "Blog not found" });
+    return res.json({ ok: true });
 });
-const express = require("express");
-const cors = require("cors");
-const multer = require("multer");
-const crypto = require("crypto");
-const axios = require("axios");
-const fs = require("fs");
-const path = require("path");
-const { supabasePublic, supabaseAdmin } = require("./supabaseClients");
 
-const app = express();
-
-app.use(
-    cors({
-        origin: true,
-        credentials: true,
-        methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization"],
-    })
-);
-app.use(express.json());
-
-const getBearerToken = (req) => {
-    const header = req.headers.authorization || req.headers.Authorization || "";
-    const value = Array.isArray(header) ? header[0] : String(header);
-    if (value.toLowerCase().startsWith("bearer ")) return value.slice(7).trim();
-    return "";
-};
-
-const requireAdmin = async (req, res, next) => {
+// SITE SETTINGS (footer contact + social)
+app.get("/site-settings", async (req, res) => {
     try {
-        if (!supabaseAdmin) {
-            return res.status(500).json({
-                error: "Server not configured for admin writes",
-                hint:
-                    "Set SUPABASE_SERVICE_ROLE_KEY in backend/.env and restart backend.",
-            });
-        }
-
-        const token = getBearerToken(req);
-        if (!token) {
-            return res.status(401).json({ error: "Missing Authorization bearer token" });
-        }
-
-        const { data: userData, error: userError } = await supabasePublic.auth.getUser(token);
-        if (userError || !userData?.user) {
-            return res.status(401).json({ error: "Invalid or expired token" });
-        }
-
-        const user = userData.user;
-        const { data: adminRow, error: adminError } = await supabaseAdmin
-            .from("admin_users")
-            .select("user_id,email")
-            .eq("user_id", user.id)
+        const { data, error } = await supabasePublic
+            .from("site_settings")
+            .select("*")
+            .eq("id", 1)
             .maybeSingle();
 
-        if (adminError) {
+        if (error) {
             return res.status(500).json({
-                error: adminError.message || "Admin lookup failed",
-                hint: "Create the 'admin_users' table in Supabase (SQL provided in setup notes).",
+                error: error.message,
+                hint: "Create the 'site_settings' table in Supabase (SQL file provided in backend/).",
             });
         }
 
-        if (!adminRow) {
-            return res.status(403).json({ error: "Not an admin" });
+        return res.json(data || null);
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to load site settings" });
+    }
+});
+
+app.put("/site-settings", requireAdmin, async (req, res) => {
+    try {
+        const cleanText = (v) => {
+            if (v === undefined || v === null) return "";
+            return String(v).trim();
+        };
+
+        const payload = {
+            id: 1,
+            contact_email: cleanText(req.body?.contact_email),
+            contact_phone: cleanText(req.body?.contact_phone),
+            contact_address: cleanText(req.body?.contact_address),
+            instagram_url: cleanText(req.body?.instagram_url),
+            facebook_url: cleanText(req.body?.facebook_url),
+            twitter_url: cleanText(req.body?.twitter_url),
+            youtube_url: cleanText(req.body?.youtube_url),
+            updated_at: new Date().toISOString(),
+        };
+
+        const { data, error } = await supabaseAdmin
+            .from("site_settings")
+            .upsert(payload, { onConflict: "id" })
+            .select("*")
+            .single();
+
+        if (error) {
+            return res.status(500).json({
+                error: error.message,
+                hint: "Create the 'site_settings' table in Supabase (SQL file provided in backend/).",
+            });
         }
 
-        req.admin = { id: user.id, email: adminRow.email || user.email || null };
-        return next();
+        return res.json({ ok: true, settings: data });
     } catch (e) {
-        return res.status(500).json({ error: e?.message || "Admin auth failed" });
+        return res.status(500).json({ error: e?.message || "Failed to save site settings" });
     }
-};
+});
+
+// BEST SELLING OF 2026 (homepage horizontal scroller)
+app.get("/best-selling-2026", async (req, res) => {
+    try {
+        // Preferred path: join through FK relationship best_selling_2026.product_id -> products.id
+        const { data, error } = await supabasePublic
+            .from("best_selling_2026")
+            .select("position, product:products(*)")
+            .eq("active", true)
+            .order("position", { ascending: true })
+            .limit(60);
+
+        if (!error) {
+            const products = (Array.isArray(data) ? data : [])
+                .map((row) => row?.product)
+                .filter(Boolean);
+            return res.json(products);
+        }
+
+        // Fallback: fetch mapping rows then fetch products separately.
+        const mapping = await supabasePublic
+            .from("best_selling_2026")
+            .select("product_id, position")
+            .eq("active", true)
+            .order("position", { ascending: true })
+            .limit(60);
+
+        if (mapping.error) {
+            return res.status(500).json({ error: mapping.error.message || "Failed to load best selling list" });
+        }
+
+        const rows = Array.isArray(mapping.data) ? mapping.data : [];
+        const ids = rows.map((r) => r.product_id).filter((v) => Number.isFinite(Number(v)));
+        if (ids.length === 0) return res.json([]);
+
+        const productsRes = await supabasePublic
+            .from("products")
+            .select("*")
+            .in("id", ids);
+
+        if (productsRes.error) {
+            return res.status(500).json({ error: productsRes.error.message || "Failed to load products" });
+        }
+
+        const byId = new Map((productsRes.data || []).map((p) => [p.id, p]));
+        const ordered = rows.map((r) => byId.get(r.product_id)).filter(Boolean);
+        return res.json(ordered);
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to load best selling" });
+    }
+});
+
+// POLICIES (static pages editable in admin)
+app.get("/policies", async (req, res) => {
+    try {
+        const { data, error } = await supabasePublic
+            .from("policies")
+            .select("id,title,slug,footer_group,updated_at,created_at")
+            .order("footer_group", { ascending: true })
+            .order("title", { ascending: true });
+
+        if (error) return res.status(500).json({ error: error.message });
+        return res.json(Array.isArray(data) ? data : []);
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to load policies" });
+    }
+});
+
+app.get("/policies/:slug", async (req, res) => {
+    try {
+        const slug = String(req.params.slug || "").trim();
+        if (!slug) return res.status(400).json({ error: "Missing policy slug" });
+
+        const { data, error } = await supabasePublic
+            .from("policies")
+            .select("*")
+            .eq("slug", slug)
+            .single();
+
+        if (error || !data) return res.status(404).json({ error: "Policy not found" });
+        return res.json(data);
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to load policy" });
+    }
+});
+
+app.post("/policies", requireAdmin, async (req, res) => {
+    try {
+        const title = String(req.body?.title || "").trim();
+        const content = String(req.body?.content || "").trim();
+        const footer_group = String(req.body?.footer_group || "Privacy & Legal").trim();
+        const rawSlug = String(req.body?.slug || "").trim();
+
+        if (!title) return res.status(400).json({ error: "Title required" });
+
+        const slug = rawSlug
+            ? slugify(rawSlug)
+            : slugify(title);
+
+        const { data, error } = await supabaseAdmin
+            .from("policies")
+            .insert([{ title, slug, content, footer_group }])
+            .select("*")
+            .single();
+
+        if (error) return res.status(500).json({ error: error.message });
+        return res.status(201).json({ ok: true, policy: data });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to create policy" });
+    }
+});
+
+app.put("/policies/:id", requireAdmin, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const title = String(req.body?.title || "").trim();
+        const content = String(req.body?.content || "").trim();
+        const footer_group = String(req.body?.footer_group || "Privacy & Legal").trim();
+        const rawSlug = String(req.body?.slug || "").trim();
+
+        if (!id) return res.status(400).json({ error: "Missing policy id" });
+        if (!title) return res.status(400).json({ error: "Title required" });
+
+        const slug = rawSlug
+            ? slugify(rawSlug)
+            : slugify(title);
+
+        const { data, error } = await supabaseAdmin
+            .from("policies")
+            .update({ title, slug, content, footer_group, updated_at: new Date().toISOString() })
+            .eq("id", id)
+            .select("*")
+            .single();
+
+        if (error) return res.status(500).json({ error: error.message });
+        if (!data) return res.status(404).json({ error: "Policy not found" });
+        return res.json({ ok: true, policy: data });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to update policy" });
+    }
+});
+
+app.delete("/policies/:id", requireAdmin, async (req, res) => {
+    try {
+        const id = req.params.id;
+        if (!id) return res.status(400).json({ error: "Missing policy id" });
+
+        const { data, error } = await supabaseAdmin
+            .from("policies")
+            .delete()
+            .eq("id", id)
+            .select("id")
+            .maybeSingle();
+
+        if (error) return res.status(500).json({ error: error.message });
+        if (!data) return res.status(404).json({ error: "Policy not found" });
+        return res.json({ ok: true });
+    } catch (e) {
+        return res.status(500).json({ error: e?.message || "Failed to delete policy" });
+    }
+});
 
 const requireCustomer = async (req, res, next) => {
     try {
