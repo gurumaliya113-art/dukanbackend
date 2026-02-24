@@ -19,7 +19,8 @@ values
   ('Returns Information', 'returns-information', '', 'Help'),
   ('Delivery Information', 'delivery-information', '', 'Help'),
   ('Product Recall', 'product-recall', '', 'Help'),
-  ('Media & Press', 'media-press', '', 'Other Services'),
-  ('The Company', 'the-company', '', 'Other Services'),
-  ('Careers', 'careers', '', 'Other Services')
+  ('Blog Home', 'blog', '', 'Blog'),
+  ('Media & Press', 'media-press', '', 'Blog'),
+  ('The Company', 'the-company', '', 'Blog'),
+  ('Careers', 'careers', '', 'Blog')
 on conflict (slug) do nothing;
