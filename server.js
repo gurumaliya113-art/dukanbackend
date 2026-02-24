@@ -920,18 +920,34 @@ app.get("/products/slug/:slug", async (req, res) => {
 
 // 👉 ADD PRODUCT (ADMIN)
 app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
-    const { name, description } = req.body || {};
-    const category = normalizeCategory(req.body?.category);
-    const priceInrRaw = req.body?.price_inr ?? req.body?.priceInr ?? req.body?.price;
-    const priceUsdRaw = req.body?.price_usd ?? req.body?.priceUsd;
-    const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr ?? req.body?.mrp;
-    const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
-    const costInrRaw = req.body?.cost_inr ?? req.body?.costInr;
-    const costUsdRaw = req.body?.cost_usd ?? req.body?.costUsd;
-    const sizesRaw = req.body?.sizes;
-    const skuRaw = req.body?.sku;
-    const barcodeRaw = req.body?.barcode;
-    const quantityRaw = req.body?.quantity ?? req.body?.stock_quantity ?? req.body?.stock;
+        const { name, description } = req.body || {};
+        const category = normalizeCategory(req.body?.category);
+        const priceInrRaw = req.body?.price_inr ?? req.body?.priceInr ?? req.body?.price;
+        const priceUsdRaw = req.body?.price_usd ?? req.body?.priceUsd;
+        const mrpInrRaw = req.body?.mrp_inr ?? req.body?.mrpInr ?? req.body?.mrp;
+        const mrpUsdRaw = req.body?.mrp_usd ?? req.body?.mrpUsd;
+        const costInrRaw = req.body?.cost_inr ?? req.body?.costInr;
+        const costUsdRaw = req.body?.cost_usd ?? req.body?.costUsd;
+        const sizesRaw = req.body?.sizes;
+        const skuRaw = req.body?.sku;
+        const barcodeRaw = req.body?.barcode;
+        const quantityRaw = req.body?.quantity ?? req.body?.stock_quantity ?? req.body?.stock;
+
+        // Slugify utility
+        function slugify(text) {
+            return text
+                .toString()
+                .toLowerCase()
+                .replace(/[^a-z0-9\s-]/g, '')
+                .trim()
+                .replace(/\s+/g, '-')
+                .replace(/-+/g, '-');
+        }
+
+        // Always generate slug if not provided
+        const slug = req.body?.slug && String(req.body.slug).trim() !== ''
+            ? String(req.body.slug).trim()
+            : (name ? slugify(name) : null);
 
     try {
         const keys = Object.keys(req.body || {});
@@ -1079,6 +1095,7 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
         sku: skuRaw !== undefined && String(skuRaw).trim() ? String(skuRaw).trim() : null,
         barcode: barcodeRaw !== undefined && String(barcodeRaw).trim() ? String(barcodeRaw).trim() : null,
         quantity: quantityRaw !== undefined ? parsedQuantity : null,
+        slug,
         ...imageUrls,
     };
 
