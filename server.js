@@ -870,7 +870,7 @@ app.get("/products", async (req, res) => {
     res.json(data);
 });
 
-// 👉 SINGLE PRODUCT (DETAIL PAGE)
+// 👉 SINGLE PRODUCT BY ID (DETAIL PAGE)
 app.get("/products/:id", async (req, res) => {
     const id = Number(req.params.id);
     if (Number.isNaN(id)) {
@@ -881,6 +881,30 @@ app.get("/products/:id", async (req, res) => {
         .from("products")
         .select("*")
         .eq("id", id)
+        .maybeSingle();
+
+    if (error) {
+        return res.status(400).json(error);
+    }
+
+    if (!data) {
+        return res.status(404).json({ error: "Product not found" });
+    }
+
+    res.json(data);
+});
+
+// 👉 SINGLE PRODUCT BY SLUG (DETAIL PAGE)
+app.get("/products/slug/:slug", async (req, res) => {
+    const slug = String(req.params.slug || "").trim().toLowerCase();
+    if (!slug) {
+        return res.status(400).json({ error: "Missing product slug" });
+    }
+
+    const { data, error } = await supabasePublic
+        .from("products")
+        .select("*")
+        .eq("slug", slug)
         .maybeSingle();
 
     if (error) {
