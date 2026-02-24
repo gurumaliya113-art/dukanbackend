@@ -996,8 +996,9 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
         image4: null,
     };
 
-    // If request is multipart, upload images to Supabase Storage
-    if (Array.isArray(req.files) && req.files.length > 0) {
+    // Fix: handle multer.fields() output for images
+    const uploadedImages = req.files && req.files["images"] ? req.files["images"] : [];
+    if (Array.isArray(uploadedImages) && uploadedImages.length > 0) {
         const bucket = getBucketName();
         const allowed = new Set(["image/jpeg", "image/png", "image/webp"]);
 
@@ -1011,8 +1012,8 @@ app.post("/products", requireAdmin, maybeUploadImages, async (req, res) => {
             });
         }
 
-        for (let i = 0; i < Math.min(req.files.length, 4); i++) {
-            const file = req.files[i];
+        for (let i = 0; i < Math.min(uploadedImages.length, 4); i++) {
+            const file = uploadedImages[i];
             if (!allowed.has(file.mimetype)) {
                 return res.status(400).json({
                     error: "Only JPG/PNG/WEBP images are allowed",
