@@ -1,4 +1,5 @@
 // ...existing code...
+// ...existing code...
 // --- Razorpay Integration ---
 const Razorpay = require("razorpay");
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "YOUR_KEY_ID";
@@ -8,7 +9,13 @@ const razorpay = new Razorpay({
     key_secret: RAZORPAY_KEY_SECRET,
 });
 
-// Create Razorpay order endpoint (after app initialization)
+// Place Razorpay endpoint after app and middleware
+// Middleware
+app.use(cors({ origin: true }));
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// Create Razorpay order endpoint
 app.post("/create-razorpay-order", async (req, res) => {
     const { amount, currency = "INR", receipt } = req.body;
     try {
