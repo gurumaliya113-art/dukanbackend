@@ -1,3 +1,27 @@
+// --- Razorpay Integration ---
+const Razorpay = require("razorpay");
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "YOUR_KEY_ID";
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "YOUR_KEY_SECRET";
+const razorpay = new Razorpay({
+    key_id: RAZORPAY_KEY_ID,
+    key_secret: RAZORPAY_KEY_SECRET,
+});
+
+// Create Razorpay order endpoint
+app.post("/create-razorpay-order", async (req, res) => {
+    const { amount, currency = "INR", receipt } = req.body;
+    try {
+        const options = {
+            amount: Math.round(Number(amount) * 100), // rupees to paise
+            currency,
+            receipt: receipt || `rcpt_${Date.now()}`,
+        };
+        const order = await razorpay.orders.create(options);
+        res.json(order);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
