@@ -1,35 +1,3 @@
-// ...existing code...
-// ...existing code...
-// --- Razorpay Integration ---
-const Razorpay = require("razorpay");
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "YOUR_KEY_ID";
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "YOUR_KEY_SECRET";
-const razorpay = new Razorpay({
-    key_id: RAZORPAY_KEY_ID,
-    key_secret: RAZORPAY_KEY_SECRET,
-});
-
-// Place Razorpay endpoint after app and middleware
-// Middleware
-app.use(cors({ origin: true }));
-app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
-
-// Create Razorpay order endpoint
-app.post("/create-razorpay-order", async (req, res) => {
-    const { amount, currency = "INR", receipt } = req.body;
-    try {
-        const options = {
-            amount: Math.round(Number(amount) * 100), // rupees to paise
-            currency,
-            receipt: receipt || `rcpt_${Date.now()}`,
-        };
-        const order = await razorpay.orders.create(options);
-        res.json(order);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
-});
 const express = require("express");
 const cors = require("cors");
 const multer = require("multer");
@@ -37,6 +5,7 @@ const crypto = require("crypto");
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const Razorpay = require("razorpay");
 const { supabasePublic, supabaseAdmin } = require("./supabaseClients");
 
 const app = express();
@@ -45,6 +14,46 @@ const app = express();
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// --- Razorpay Integration ---
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "YOUR_KEY_ID";
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "YOUR_KEY_SECRET";
+
+const razorpay =
+    RAZORPAY_KEY_ID !== "YOUR_KEY_ID" && RAZORPAY_KEY_SECRET !== "YOUR_KEY_SECRET"
+        ? new Razorpay({
+              key_id: RAZORPAY_KEY_ID,
+              key_secret: RAZORPAY_KEY_SECRET,
+          })
+        : null;
+
+// Create Razorpay order endpoint
+app.post("/create-razorpay-order", async (req, res) => {
+    if (!razorpay) {
+        return res.status(500).json({
+            error: "Razorpay not configured",
+            hint: "Set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in Railway environment variables.",
+        });
+    }
+
+    const { amount, currency = "INR", receipt } = req.body;
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+        return res.status(400).json({ error: "Invalid amount" });
+    }
+
+    try {
+        const options = {
+            amount: Math.round(numericAmount * 100), // rupees to paise
+            currency,
+            receipt: receipt || `rcpt_${Date.now()}`,
+        };
+        const order = await razorpay.orders.create(options);
+        return res.json(order);
+    } catch (err) {
+        return res.status(500).json({ error: err?.message || "Razorpay order failed" });
+    }
+});
 
 // Helper functions and middleware
 const getBearerToken = (req) => {
