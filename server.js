@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const helmet = require("helmet");
 const multer = require("multer");
 const crypto = require("crypto");
 const axios = require("axios");
@@ -10,10 +11,52 @@ const { supabasePublic, supabaseAdmin } = require("./supabaseClients");
 
 const app = express();
 
+app.disable("x-powered-by");
+app.set("trust proxy", 1);
+
+// Security headers (production-safe defaults).
+app.use(
+    helmet({
+        // Some routes embed third-party scripts (Razorpay/PayPal) on the frontend.
+        // Keep CSP permissive to avoid breaking checkout flows when backend is proxied.
+        contentSecurityPolicy: {
+            useDefaults: true,
+            directives: {
+                "default-src": ["'self'", "https:", "data:", "blob:"],
+                "base-uri": ["'self'"],
+                "object-src": ["'none'"],
+                "frame-ancestors": ["'none'"]
+            },
+        },
+        crossOriginEmbedderPolicy: false,
+    })
+);
+
+// Force HTTPS in production (works behind reverse proxies like Railway/Render/Nginx).
+app.use((req, res, next) => {
+    if (process.env.NODE_ENV !== "production") return next();
+    const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "http").toLowerCase();
+    if (proto === "https") return next();
+    const host = req.headers.host;
+    if (!host) return next();
+    return res.redirect(301, `https://${host}${req.originalUrl || "/"}`);
+});
+
 // Middleware
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// HSTS (only when served over HTTPS)
+app.use((req, res, next) => {
+    const proto = String(req.headers["x-forwarded-proto"] || req.protocol || "http").toLowerCase();
+    if (process.env.NODE_ENV === "production" && proto === "https") {
+        res.setHeader("Strict-Transport-Security", "max-age=15552000; includeSubDomains; preload");
+    }
+    res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+    res.setHeader("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+    return next();
+});
 
 // --- Razorpay Integration ---
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "YOUR_KEY_ID";
